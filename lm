@@ -1,0 +1,216 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.8"
+# dependencies = [
+#   "requests",
+#   "rich",
+#   "pyperclip",
+#   "arabic_reshaper",
+#   "python-bidi",
+# ]
+# ///
+
+import sys
+import json
+import os
+import argparse
+import subprocess
+from typing import Generator, Optional, List
+from pathlib import Path
+
+import requests
+import pyperclip
+from rich.console import Console
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.spinner import Spinner
+
+import arabic_reshaper
+from bidi.algorithm import get_display
+
+
+def fix_rtl_output(text: str) -> str:
+    """Correctly shapes and reorders RTL text for terminal display."""
+    reshaped_text = arabic_reshaper.reshape(text)
+    bidi_text = get_display(reshaped_text)
+    return bidi_text
+
+# --- Default Configuration ---
+DEFAULT_API_URL = "http://localhost:1234/v1/chat/completions"
+DEFAULT_MODEL = "google/gemma-3-4b"
+DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant inside a terminal. Keep your responses short and concise."
+
+def get_config_path() -> Path:
+    """Gets the base configuration directory respecting XDG standards."""
+    xdg_config_home = os.getenv('XDG_CONFIG_HOME')
+    if xdg_config_home:
+        return Path(xdg_config_home)
+    return Path.home() / ".config"
+
+def create_arg_parser() -> argparse.ArgumentParser:
+    """Creates and configures the argument parser."""
+    parser = argparse.ArgumentParser(
+        description="A command-line chatbot that uses agent profiles, files, and the clipboard as context.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("prompt", nargs="?", default=None, help="The user prompt. Reads from stdin if not provided.")
+    parser.add_argument("-m", "--model", default=os.getenv("CHAT_MODEL", DEFAULT_MODEL), help="The model to use.")
+    parser.add_argument("-u", "--api-url", default=os.getenv("CHAT_API_URL", DEFAULT_API_URL), help="The API endpoint URL.")
+    parser.add_argument("-t", "--temperature", type=float, default=0.2, help="The sampling temperature.")
+    parser.add_argument("-p", "--top-p", type=float, default=0.95, help="The nucleus sampling probability.")
+    parser.add_argument("-f", "--file", action="append", help="Path to a file to add to the context. Can be used multiple times.")
+    parser.add_argument("-c", "--from-clipboard", action="store_true", help="Add the content of the clipboard to the context.")
+    # --- Agent Arguments ---
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-a", "--agent", help="Name of the agent profile to load.")
+    group.add_argument("-e", "--edit-agent", metavar="AGENT_NAME", help="Create or edit an agent profile.")
+    return parser
+
+def edit_agent_profile(console: Console, agent_name: str):
+    """Creates or opens an agent profile file in the user's default editor."""
+    config_dir = get_config_path()
+    agent_dir = config_dir / "lm"
+    
+    # Ensure the ~/.config/lm directory exists
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    
+    prompt_path = agent_dir / f"{agent_name}.md"
+    editor = os.getenv('EDITOR', 'nano') # Fallback to nano if $EDITOR is not set
+    
+    console.print(f"Opening agent '[cyan]{agent_name}[/cyan]' with [yellow]{editor}[/yellow]...")
+    console.print(f"File path: [dim]{prompt_path}[/dim]")
+    
+    try:
+        subprocess.run([editor, str(prompt_path)], check=True)
+    except FileNotFoundError:
+        console.print(f"[bold red]Error:[/bold red] Editor '{editor}' not found. Please set your $EDITOR environment variable.")
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        console.print(f"[bold red]Error:[/bold red] Editor exited with a non-zero status: {e.returncode}")
+        sys.exit(1)
+
+
+def load_system_prompt(console: Console, agent_name: Optional[str]) -> str:
+    """Loads the system prompt from a file if an agent is specified."""
+    if not agent_name:
+        return DEFAULT_SYSTEM_PROMPT
+
+    config_dir = get_config_path()
+    prompt_path = config_dir / "lm" / f"{agent_name}.md"
+
+    if not prompt_path.is_file():
+        console.print(f"[bold red]Error:[/bold red] Agent profile not found at '[yellow]{prompt_path}[/yellow]'")
+        console.print(f"Create it by running: [bold]./your_script_name.py --edit-agent {agent_name}[/bold]")
+        sys.exit(1)
+    
+    try:
+        return prompt_path.read_text(encoding='utf-8')
+    except IOError as e:
+        console.print(f"[bold red]Error reading agent profile '{prompt_path}':[/bold red] {e}")
+        sys.exit(1)
+
+def get_input(prompt_arg: Optional[str]) -> str:
+    if prompt_arg: return prompt_arg
+    if not sys.stdin.isatty(): return sys.stdin.read().strip()
+    return ""
+
+def stream_api_response(session: requests.Session, url: str, payload: dict) -> Generator[str, None, None]:
+    try:
+        with session.post(url, json=payload, stream=True) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line: continue
+                decoded_line = line.decode('utf-8')
+                if not decoded_line.startswith("data: "): continue
+                json_data = decoded_line[len("data: "):].strip()
+                if json_data == "[DONE]": break
+                try:
+                    data_chunk = json.loads(json_data)
+                    content = data_chunk["choices"][0]["delta"].get("content")
+                    if content: yield content
+                except (json.JSONDecodeError, KeyError, IndexError): continue
+    except requests.exceptions.RequestException as e:
+        raise ConnectionError(f"API request failed: {e}") from e
+
+def build_context(console: Console, from_clipboard: bool, files: Optional[List[str]]) -> str:
+    context_parts = []
+    if from_clipboard:
+        try:
+            clipboard_content = pyperclip.paste()
+            if clipboard_content: context_parts.append(f"--- Content from clipboard ---\n{clipboard_content}")
+            else: console.print("[yellow]Warning: Clipboard is empty.[/yellow]", file=sys.stderr)
+        except pyperclip.PyperclipException as e:
+            console.print(f"[bold red]Clipboard error:[/bold red] {e}. Is a clipboard tool installed?", file=sys.stderr)
+    if files:
+        for file_path in files:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    context_parts.append(f"--- Content from file: {file_path} ---\n{f.read()}")
+            except FileNotFoundError:
+                console.print(f"[bold red]Error:[/bold red] File not found at '{file_path}'", file=sys.stderr)
+                sys.exit(1)
+            except IOError as e:
+                console.print(f"[bold red]Error reading file '{file_path}':[/bold red] {e}", file=sys.stderr)
+                sys.exit(1)
+    return "\n\n".join(context_parts)
+
+def main() -> None:
+    parser = create_arg_parser()
+    args = parser.parse_args()
+    console = Console()
+    
+    # --- Handle editing action and exit ---
+    if args.edit_agent:
+        edit_agent_profile(console, args.edit_agent)
+        sys.exit(0)
+
+    system_prompt = load_system_prompt(console, args.agent)
+    context_str = build_context(console, args.from_clipboard, args.file)
+    user_prompt = get_input(args.prompt)
+
+    final_user_message = user_prompt
+    if context_str:
+        final_user_message = f"{context_str}\n\n---\n\n{user_prompt}" if user_prompt else context_str
+
+    if not final_user_message:
+        parser.print_help(file=sys.stderr)
+        sys.exit(1)
+
+    headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+    payload = {
+        "model": args.model,
+        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": final_user_message}],
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "stream": True,
+    }
+    
+    buffer = ""
+    session = requests.Session()
+    session.headers.update(headers)
+
+    try:
+        spinner = Spinner("dots", " Waiting for response...")
+        with Live(spinner, console=console, auto_refresh=True, transient=True) as live:
+            first_chunk = True
+            for content_chunk in stream_api_response(session, args.api_url, payload):
+                if first_chunk:
+                    live.update(Markdown(""), refresh=True)
+                    first_chunk = False
+                buffer += content_chunk
+                display_text = fix_rtl_output(buffer)
+                live.update(Markdown(display_text), refresh=True)
+    except ConnectionError as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stream interrupted by user.[/yellow]")
+    finally:
+        if buffer:
+            display_text = fix_rtl_output(buffer)
+            console.print(Markdown(display_text))
+        else:
+            console.print()
+
+if __name__ == "__main__":
+    main()
