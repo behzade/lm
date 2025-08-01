@@ -308,11 +308,21 @@ def load_system_prompt(console: Console, agent_name: Optional[str]) -> str:
 
 
 def get_input(prompt_arg: Optional[str]) -> str:
+    """Gets input from the prompt argument and/or stdin, combining them if both are present."""
+    prompt_parts = []
+
+    # Get content from the command-line argument first, as it's often an instruction
     if prompt_arg:
-        return prompt_arg
+        prompt_parts.append(prompt_arg)
+
+    # Get content from stdin (if piped)
     if not sys.stdin.isatty():
-        return sys.stdin.read().strip()
-    return ""
+        stdin_content = sys.stdin.read().strip()
+        if stdin_content:
+            prompt_parts.append(stdin_content)
+
+    # Join them with a clear separator
+    return "\n\n".join(prompt_parts)
 
 
 def build_context(
@@ -397,7 +407,7 @@ def main(
     ] = 5,
     temperature: Annotated[
         float, typer.Option("-t", "--temperature", help="The sampling temperature.")
-    ] = 0.2,
+    ] = 0.7,
     top_p: Annotated[
         float, typer.Option("-p", "--top-p", help="The nucleus sampling probability.")
     ] = 0.95,

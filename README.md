@@ -1,131 +1,110 @@
-# lm — A CLI Chat Client for OpenAI-compatible LLMs
+# lm — A CLI Chat Client for OpenAI‑compatible LLMs
 
-A single-file command-line client for chatting with OpenAI-compatible APIs. Built for terminal workflows, with streaming Markdown output, tool use, context injection, and agent personas.
+A single‑file terminal client for chatting with OpenAI‑compatible APIs. Designed for fast CLI workflows with streaming Markdown, tool use, context injection, and agent personas.
 
 ## Highlights
-
-- Single-shot prompts from argv or stdin, with live streaming output.
-- Context from files (-f) and clipboard (-c).
-- Agent personas (-a) loaded from ~/.config/lm/ (or $XDG_CONFIG_HOME/lm/).
-- Create/edit agent prompts (-e) in your editor.
-- Clean TUI: rich spinners, syntax highlighting, RTL text support.
-- Tool use: web_search and write_to_file with interactive confirmation.
-- Self-contained via uv runner (installs deps automatically).
+- One‑shot prompts via argv or stdin with live streaming output
+- Add context from files (-f) and clipboard (-c)
+- Agent personas (-a) stored in ~/.config/lm/ (or $XDG_CONFIG_HOME/lm/); edit with -e
+- Clean TUI: spinners, syntax highlighting, RTL text support
+- Tool use: web_search and write_to_file with interactive confirmation
+- Self‑contained via uv runner (deps auto‑installed)
 
 ## Installation
-
-1) Ensure you have uv installed (https://github.com/astral-sh/uv).
-2) Make the script executable and place it on your PATH:
-
+1) Install uv: https://github.com/astral-sh/uv
+2) Make executable and place on PATH:
    chmod +x lm
-   mv lm /usr/local/bin/lm   # or anywhere on PATH
+   mv lm /usr/local/bin/lm
 
-The shebang uses: uv run --script
-All Python dependencies are declared in the script header and auto-managed by uv.
+Shebang uses: uv run --script. All Python deps are declared in the script header and managed by uv.
 
 ## Configuration
-
-Config lives at:
+Config path:
 - Linux/macOS: $XDG_CONFIG_HOME/lm/config.json or ~/.config/lm/config.json
 
-On first run, a default config is created:
+First run creates default:
 {
   "model": "local-model",
   "api_url": "http://localhost:1234/v1",
   "api_key_var": "sk-dummy"
 }
+- model: Target model name
+- api_url: OpenAI‑compatible base URL (LM Studio, llama.cpp server, proxies)
+- api_key_var: Env var name for API key; if "sk-dummy", no env var required
 
-- model: Model name for your target server.
-- api_url: Base URL of an OpenAI-compatible API (e.g., LM Studio, llama.cpp server, OpenAI proxy).
-- api_key_var: Name of the env var holding your API key. If set to "sk-dummy", no env var is required.
-
-Export your key if needed:
-  export OPENAI_API_KEY=sk-... then set "api_key_var": "OPENAI_API_KEY" in config.json
+Export your key if needed, then set api_key_var accordingly:
+  export OPENAI_API_KEY=sk-...
 
 ## Agent Personas
-
-Agent prompt files live in ~/.config/lm/ (or $XDG_CONFIG_HOME/lm/). Example: coder.md, writer.md.
-
+Persona files live in ~/.config/lm/ (or $XDG_CONFIG_HOME/lm/). Examples: coder.md, writer.md
 - Create/edit: lm -e coder
 - Use:        lm -a coder "Refactor this function"
-
-When an agent is used, the script appends today’s date to the system prompt.
+When an agent is used, today’s date is appended to the system prompt.
 
 ## Usage
-
 Basic:
   echo "Explain RAG" | lm
   lm "Write a bash script to list large files"
 
-Add context from files and clipboard:
+Add context:
   lm -f README.md -f main.py -c "Summarize"
 
-Choose model and API endpoint:
+Choose model and API URL:
   lm -m mistral -u http://localhost:8080/v1 "Summarize this"
 
-Sampling controls:
+Sampling:
   lm -t 0.2 -p 0.95 "Give me 3 ideas"
 
-Limit tool turns (chain-of-thought with tools):
+Limit tool turns (for tool‑augmented tasks):
   lm -l 3 "Find latest release notes for project X and save a summary"
 
 ## Options
+- prompt (arg)              User prompt; if omitted, reads from stdin
+- -f, --file PATH           Include file content (repeatable)
+- -c, --from-clipboard      Include system clipboard content
+- -a, --agent NAME          Load agent persona from config dir
+- -e, --edit-agent NAME     Create/edit persona in $EDITOR (default: nano)
+- -m, --model NAME          Override configured model
+- -u, --api-url URL         Override API base URL
+- -l, --max-tool-turns N    Max tool-use turns (default: 5)
+- -t, --temperature FLOAT   Sampling temperature (default: 0.2)
+- -p, --top-p FLOAT         Nucleus sampling p (default: 0.95)
 
-- prompt (arg)     The user prompt. If omitted, reads from stdin.
-- -f, --file PATH  Add file content to context. Repeatable.
-- -c, --from-clipboard  Include system clipboard content.
-- -a, --agent NAME Load agent persona from config dir.
-- -e, --edit-agent NAME  Create/edit an agent persona in $EDITOR (default: nano).
-- -m, --model NAME Override configured model.
-- -u, --api-url URL Override configured API base URL.
-- -l, --max-tool-turns N  Max tool-use turns (default: 5).
-- -t, --temperature FLOAT Sampling temperature (default: 0.2).
-- -p, --top-p FLOAT Nucleus sampling p (default: 0.95).
-
-## Streaming, Markdown, and RTL
-
-Responses stream live with a spinner. Rich renders Markdown, code blocks, and syntax highlighting. RTL languages (e.g., Farsi/Arabic) are reshaped/reordered for terminals that lack native RTL support.
+## Streaming, Markdown, RTL
+Live streaming with spinner. Renders Markdown and code with syntax highlighting. RTL languages (e.g., Farsi/Arabic) are reshaped/reordered for terminals lacking native RTL support.
 
 ## Tools
-
-The client can call tools via the OpenAI function-calling interface.
-
-Available tools:
+The client supports OpenAI function-calling tools.
 
 1) web_search
-   - Uses DuckDuckGo (ddgs) to retrieve results.
-   - Returns a formatted list of sources with titles, snippets, and URLs.
+   - Uses DuckDuckGo (ddgs)
+   - Returns sources with titles, snippets, URLs
 
 2) write_to_file
-   - Proposes creating a new file with provided content.
-   - Interactive preview with syntax highlighting and y/Enter or n/Esc confirmation.
-   - Fails if the target file already exists.
+   - Creates a new file with provided content
+   - Interactive preview, syntax highlighting; confirm with y/Enter, cancel with n/Esc
+   - Fails if the target file already exists
 
-You’ll see a "Tool call(s) requested by model..." notice when tools are invoked.
+You’ll see a notice when tools are invoked.
 
 ## Token Counters
+At end of run, prints token counts if available, e.g. ->:123 <-:456
 
-At the end of a run, input and output token counts are shown if available, e.g.:
-  ->:123 <-:456
-
-## Exit Codes and Errors
-
-- Returns 1 on API/config errors.
-- Returns 130 on Ctrl-C.
-- Displays readable messages for file/clipboard issues.
+## Exit Codes
+- 1   API/config errors
+- 130 Ctrl-C
+Readable messages are shown for file/clipboard issues.
 
 ## Tips
+- Pipe large context via stdin; add -f files for structure
+- Keep reusable system prompts as agent files
+- Use -l 1 to force a single assistant turn with no tool calls on the final round
 
-- Pipe large context in via stdin, and still reference files with -f for structure.
-- Keep reusable system prompts as agent files for quick switching.
-- Use -l 1 to force a single assistant turn with no tool calls on the final round.
-
-## Related utility: ctx
-
-The companion ctx script recursively gathers files by extension, filters paths, and copies the aggregate text to the clipboard. Great for assembling context before calling lm.
-
+## Related: ctx
+The companion ctx script recursively gathers files by extension, filters paths, and copies aggregate text to the clipboard—useful for assembling context before lm.
 Example:
-```
   ctx -i .git -i node_modules . py md
   lm -c "Summarize the repo and outline TODOs"
-```
+
+Or with -s flag of ctx to output to stdout:
+  ctx -s -i .git -i node_modules . py md | lm -c "Summarize the repo and outline TODOs"
