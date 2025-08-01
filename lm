@@ -24,11 +24,13 @@ from collections import defaultdict
 import openai
 import pyperclip
 import typer
+from typer import Abort
 from typing_extensions import Annotated
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.spinner import Spinner
+from rich.syntax import Syntax
 
 import arabic_reshaper
 from bidi.algorithm import get_display
@@ -36,26 +38,9 @@ from ddgs import DDGS
 
 # --- Constants ---
 DEFAULT_LOCAL_API_URL = "http://localhost:1234/v1"
-DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant inside a terminal. Keep your responses short and concise."
+DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant inside a terminal. Keep your responses short and concise. When asked to create a file, first use the write_to_file tool, then report the result to the user."
 
 # --- Tool Definitions and Mappings ---
-search_tool_definition = {
-    "type": "function",
-    "function": {
-        "name": "web_search",
-        "description": "Performs a web search using DuckDuckGo to get up-to-date information or context about recent events, or specific facts.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The search query to send to the search engine.",
-                }
-            },
-            "required": ["query"],
-        },
-    },
-}
 
 
 def perform_web_search(query: str, num_results: int = 10) -> str:
@@ -73,12 +58,64 @@ def perform_web_search(query: str, num_results: int = 10) -> str:
         return f"An error occurred during web search: {e}"
 
 
-# Central registry for tools and their corresponding functions
+def _perform_write_to_file(filename: str, content: str) -> str:
+    """(Internal) Writes content to a file after checks are complete."""
+    try:
+        path = Path(filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return f"Success: File '{filename}' was created."
+    except IOError as e:
+        return f"Error: Could not write to file '{filename}'. Reason: {e}"
+
+
+search_tool_definition = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "Performs a web search to get up-to-date information or context.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query."}
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+write_tool_definition = {
+    "type": "function",
+    "function": {
+        "name": "write_to_file",
+        "description": "Proposes to write content to a new local file. Fails if the file already exists.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "The path and name for the new file (e.g., 'src/main.py').",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The full content to write into the file.",
+                },
+            },
+            "required": ["filename", "content"],
+        },
+    },
+}
+
+# Central registry for tools
 AVAILABLE_TOOLS = {
     "web_search": {
         "definition": search_tool_definition,
         "function": perform_web_search,
-    }
+    },
+    "write_to_file": {
+        "definition": write_tool_definition,
+        "function": _perform_write_to_file,
+    },
 }
 
 
@@ -92,7 +129,6 @@ class ConfigManager:
         self.load()
 
     def load(self):
-        """Loads config from file, or creates a default config."""
         try:
             if self.config_file.is_file():
                 self.config = json.loads(self.config_file.read_text())
@@ -114,7 +150,6 @@ class ConfigManager:
             }
 
     def save(self):
-        """Saves the current configuration to the file."""
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
         self.config_file.write_text(json.dumps(self.config, indent=2))
 
@@ -123,7 +158,6 @@ class ConfigManager:
 
 
 def get_config_path() -> Path:
-    """Gets the base configuration directory respecting XDG standards."""
     xdg_config_home = os.getenv("XDG_CONFIG_HOME")
     if xdg_config_home:
         return Path(xdg_config_home) / "lm"
@@ -132,23 +166,18 @@ def get_config_path() -> Path:
 
 # --- Core Functions ---
 def fix_rtl_output(text: str) -> str:
-    """Correctly shapes and reorders RTL text for terminal display."""
     reshaped_text = arabic_reshaper.reshape(text)
-    bidi_text = get_display(reshaped_text)
-    return bidi_text
+    return get_display(reshaped_text)
 
 
 # --- Agent and Context Functions ---
 def edit_agent_profile(console: Console, agent_name: str):
-    config_dir = get_config_path()
-    agent_dir = config_dir
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    prompt_path = agent_dir / f"{agent_name}.md"
+    prompt_path = get_config_path() / f"{agent_name}.md"
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
     editor = os.getenv("EDITOR", "nano")
     console.print(
         f"Opening agent '[cyan]{agent_name}[/cyan]' with [yellow]{editor}[/yellow]..."
     )
-    console.print(f"File path: [dim]{prompt_path}[/dim]")
     try:
         subprocess.run([editor, str(prompt_path)], check=True)
     except (FileNotFoundError, subprocess.CalledProcessError) as e:
@@ -159,8 +188,7 @@ def edit_agent_profile(console: Console, agent_name: str):
 def load_system_prompt(console: Console, agent_name: Optional[str]) -> str:
     if not agent_name:
         return DEFAULT_SYSTEM_PROMPT
-    config_dir = get_config_path()
-    prompt_path = config_dir / f"{agent_name}.md"
+    prompt_path = get_config_path() / f"{agent_name}.md"
     if not prompt_path.is_file():
         console.print(
             f"[bold red]Error:[/bold red] Agent not found at '[yellow]{prompt_path}[/yellow]'"
@@ -216,36 +244,26 @@ def build_context(
 
 # --- Main Execution Logic ---
 app = typer.Typer(
-    add_completion=False,
-    help="A command-line chatbot that uses agent profiles, files, and the clipboard as context.",
-    no_args_is_help=False,
+    add_completion=False, help="A command-line chatbot.", no_args_is_help=False
 )
 
 
 @app.callback(invoke_without_command=True)
 def main(
-    # --- Prompt and Context Arguments ---
     prompt: Annotated[
         Optional[str],
         typer.Argument(help="The user prompt. Reads from stdin if not provided."),
     ] = None,
     file: Annotated[
         Optional[List[str]],
-        typer.Option(
-            "-f",
-            "--file",
-            help="Path to a file to add to the context. Can be used multiple times.",
-        ),
+        typer.Option("-f", "--file", help="Path to a file to add to the context."),
     ] = None,
     from_clipboard: Annotated[
         bool,
         typer.Option(
-            "-c",
-            "--from-clipboard",
-            help="Add the content of the clipboard to the context.",
+            "-c", "--from-clipboard", help="Add clipboard content to the context."
         ),
     ] = False,
-    # --- Agent and Configuration Arguments ---
     agent: Annotated[
         Optional[str],
         typer.Option("-a", "--agent", help="Name of the agent profile to load."),
@@ -259,12 +277,9 @@ def main(
             help="Create or edit an agent profile.",
         ),
     ] = None,
-    # --- Model and API Arguments (overrides config) ---
     model: Annotated[
         Optional[str],
-        typer.Option(
-            "-m", "--model", help="Override the configured model for this request."
-        ),
+        typer.Option("-m", "--model", help="Override the configured model."),
     ] = None,
     api_url: Annotated[
         Optional[str],
@@ -272,7 +287,6 @@ def main(
             "-u", "--api-url", help="Override the configured API endpoint URL."
         ),
     ] = None,
-    # --- API Parameters ---
     max_tool_turns: Annotated[
         int,
         typer.Option(
@@ -287,10 +301,8 @@ def main(
     ] = 0.95,
 ):
     console = Console()
-    total_in_tokens = 0
-    total_out_tokens = 0
+    total_in_tokens, total_out_tokens = 0, 0
 
-    # Handle the agent editing mode
     if edit_agent:
         edit_agent_profile(console, edit_agent)
         raise typer.Exit()
@@ -298,23 +310,22 @@ def main(
     config_manager = ConfigManager(get_config_path())
 
     try:
-        # --- Configure API Client ---
         base_url = api_url or config_manager.get("api_url")
         api_model = model or config_manager.get("model")
         api_key_var = config_manager.get("api_key_var", "sk-dummy")
+        api_key = (
+            os.getenv(api_key_var, "sk-dummy")
+            if api_key_var != "sk-dummy"
+            else "sk-dummy"
+        )
 
-        api_key = "sk-dummy"
-        if api_key_var and api_key_var != "sk-dummy":
-            api_key = os.getenv(api_key_var)
-            if not api_key:
-                console.print(
-                    f"[bold red]Error:[/bold red] The environment variable '{api_key_var}' is specified in your config but is not set."
-                )
-                raise typer.Exit(code=1)
+        if not api_key and api_key_var != "sk-dummy":
+            console.print(
+                f"[bold red]Error:[/bold red] Environment variable '{api_key_var}' is not set."
+            )
+            raise typer.Exit(code=1)
 
         client = openai.OpenAI(base_url=base_url, api_key=api_key)
-
-        # --- Build prompt and messages ---
         system_prompt = load_system_prompt(console, agent)
         context_str = build_context(console, from_clipboard, file)
         user_prompt = get_input(prompt)
@@ -324,8 +335,7 @@ def main(
 
         if not final_user_message:
             console.print(
-                "[bold red]Error:[/bold red] Prompt is empty. Provide a prompt as an argument or pipe it via stdin.",
-                file=sys.stderr,
+                "[bold red]Error:[/bold red] Prompt is empty.", file=sys.stderr
             )
             raise typer.Exit(code=1)
 
@@ -333,15 +343,12 @@ def main(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": final_user_message},
         ]
-
-        # Make all available tools accessible to the model
         tools = (
             [t["definition"] for t in AVAILABLE_TOOLS.values()]
             if AVAILABLE_TOOLS
             else None
         )
 
-        # --- Main Tool-Use Loop ---
         for i in range(max_tool_turns):
             api_kwargs = {
                 "model": api_model,
@@ -350,15 +357,12 @@ def main(
                 "top_p": top_p,
                 "stream": True,
             }
-            # Only send tool parameters if tools are available
             if tools:
                 api_kwargs["tools"] = tools
                 api_kwargs["tool_choice"] = "auto"
-                # Prevent the model from calling tools again on the last turn
                 if i == max_tool_turns - 1:
                     api_kwargs["tool_choice"] = "none"
 
-            usage = None
             spinner_text = f"[grey]{api_model}[/grey]..."
             with Live(
                 Spinner("dots", text=spinner_text),
@@ -367,48 +371,35 @@ def main(
                 transient=True,
             ) as live:
                 stream = client.chat.completions.create(**api_kwargs)
-
                 full_delta = defaultdict(str)
                 tool_calls = []
                 for chunk in stream:
-                    if chunk.usage is not None:
-                        usage = chunk.usage
-
+                    if chunk.usage:
+                        total_in_tokens += getattr(chunk.usage, "prompt_tokens", 0)
+                        total_out_tokens += getattr(chunk.usage, "completion_tokens", 0)
                     delta = chunk.choices[0].delta
                     full_delta["content"] += delta.content or ""
-
                     if delta.tool_calls:
-                        for tool_call_chunk in delta.tool_calls:
-                            if len(tool_calls) <= tool_call_chunk.index:
+                        for tc in delta.tool_calls:
+                            if len(tool_calls) <= tc.index:
                                 tool_calls.append(
-                                    {
-                                        "id": "",
-                                        "function_name": "",
-                                        "function_args": "",
-                                    }
+                                    {"id": "", "function_name": "", "function_args": ""}
                                 )
-
-                            call = tool_calls[tool_call_chunk.index]
-                            call["id"] += tool_call_chunk.id or ""
-                            call["function_name"] += tool_call_chunk.function.name or ""
-                            call["function_args"] += (
-                                tool_call_chunk.function.arguments or ""
-                            )
-
+                            call = tool_calls[tc.index]
+                            call["id"] += tc.id or ""
+                            if tc.function:
+                                call["function_name"] += tc.function.name or ""
+                                call["function_args"] += tc.function.arguments or ""
                     if not tool_calls:
                         live.update(
                             Markdown(fix_rtl_output(full_delta["content"])),
                             refresh=True,
                         )
 
-            if usage:
-                total_in_tokens += getattr(usage, "prompt_tokens", 0)
-                total_out_tokens += getattr(usage, "completion_tokens", 0)
-
-            assistant_message = {"role": "assistant"}
-            if full_delta["content"]:
-                assistant_message["content"] = full_delta["content"]
-
+            assistant_message = {
+                "role": "assistant",
+                "content": full_delta["content"] or None,
+            }
             if tool_calls:
                 console.print("[dim]Tool call requested by model...[/dim]")
                 assistant_message["tool_calls"] = [
@@ -426,29 +417,53 @@ def main(
 
                 for tool_call in assistant_message["tool_calls"]:
                     function_name = tool_call["function"]["name"]
-                    function_to_call = AVAILABLE_TOOLS.get(function_name, {}).get(
-                        "function"
-                    )
+                    tool_output = f"Error: Unknown tool '{function_name}'."
+                    try:
+                        args_dict = json.loads(tool_call["function"]["arguments"])
 
-                    if not function_to_call:
-                        console.print(
-                            f"[bold red]Error: Unknown tool '{function_name}' called by the model.[/bold red]"
-                        )
-                        tool_output = (
-                            f"Error: The tool '{function_name}' does not exist."
-                        )
-                    else:
-                        try:
-                            args_dict = json.loads(tool_call["function"]["arguments"])
+                        if function_name == "write_to_file":
+                            filename = args_dict.get("filename")
+                            content = args_dict.get("content")
+                            if not filename or content is None:
+                                tool_output = (
+                                    "Error: 'filename' and 'content' are required."
+                                )
+                            elif Path(filename).exists():
+                                tool_output = (
+                                    f"Error: File '{filename}' already exists."
+                                )
+                            else:
+                                console.print(
+                                    f"\n[bold]Model wants to create file:[/] [yellow]'{filename}'[/yellow]"
+                                )
+                                syntax = Syntax(
+                                    content,
+                                    "python",
+                                    theme="monokai",
+                                    line_numbers=True,
+                                )  # Assumes python, adjust as needed
+                                console.print(syntax)
+                                try:
+                                    if typer.confirm("Create this file?"):
+                                        tool_output = _perform_write_to_file(
+                                            filename, content
+                                        )
+                                    else:
+                                        tool_output = "User cancelled the operation."
+                                except Abort:
+                                    tool_output = "User cancelled the operation."
+
+                        elif function_name in AVAILABLE_TOOLS:
                             console.print(
                                 f"[dim]Performing: [cyan]{function_name}[/cyan] with args: {args_dict}[/dim]"
                             )
-                            tool_output = function_to_call(**args_dict)
-                        except (json.JSONDecodeError, TypeError) as e:
-                            console.print(
-                                f"[bold red]Error calling tool '{function_name}': {e}[/bold red]"
-                            )
-                            tool_output = f"Error: Invalid arguments provided for {function_name}: {e}"
+                            tool_function = AVAILABLE_TOOLS[function_name]["function"]
+                            tool_output = tool_function(**args_dict)
+
+                    except json.JSONDecodeError as e:
+                        tool_output = f"Error decoding tool arguments: {e}"
+                    except (TypeError, Abort) as e:
+                        tool_output = f"Error during tool execution: {e}"
 
                     messages.append(
                         {
@@ -457,15 +472,13 @@ def main(
                             "content": tool_output,
                         }
                     )
-                continue  # Go to the next iteration of the loop to get the final response
+                continue
 
-            # If no tool calls were made, print the response and exit the loop
             console.print(Markdown(fix_rtl_output(full_delta["content"])))
             break
 
-        total_tokens = total_in_tokens + total_out_tokens
-        if total_tokens > 0:
-            console.print(f"\n[dim]->:{total_in_tokens} <-:{total_out_tokens}")
+        if (total_in_tokens + total_out_tokens) > 0:
+            console.print(f"\n[dim]->:{total_in_tokens} <-:{total_out_tokens}[/dim]")
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user.[/yellow]")
