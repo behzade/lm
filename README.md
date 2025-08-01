@@ -40,9 +40,7 @@ On first run, a default config is created:
 - api_key_var: Name of the env var holding your API key. If set to "sk-dummy", no env var is required.
 
 Export your key if needed:
-
-  export OPENAI_API_KEY=sk-...
-  # then set "api_key_var": "OPENAI_API_KEY" in config.json
+  export OPENAI_API_KEY=sk-... then set "api_key_var": "OPENAI_API_KEY" in config.json
 
 ## Agent Personas
 
@@ -127,6 +125,7 @@ At the end of a run, input and output token counts are shown if available, e.g.:
 The companion ctx script recursively gathers files by extension, filters paths, and copies the aggregate text to the clipboard. Great for assembling context before calling lm.
 
 Example:
+```
   ctx -i .git -i node_modules . py md
   lm -c "Summarize the repo and outline TODOs"
-
+```
