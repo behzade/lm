@@ -37,7 +37,6 @@ from ddgs import DDGS
 
 # --- Constants ---
 DEFAULT_LOCAL_API_URL = "http://localhost:1234/v1"
-# --- MODIFIED: Removed mention of the write_to_file tool ---
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant inside a terminal. Keep your responses short and concise. Format your output as markdown."
 
 
@@ -200,17 +199,14 @@ def get_input(prompt_arg: Optional[str]) -> str:
     """Gets input from the prompt argument and/or stdin, combining them if both are present."""
     prompt_parts = []
 
-    # Get content from the command-line argument first, as it's often an instruction
     if prompt_arg:
         prompt_parts.append(prompt_arg)
 
-    # Get content from stdin (if piped)
     if not sys.stdin.isatty():
         stdin_content = sys.stdin.read().strip()
         if stdin_content:
             prompt_parts.append(stdin_content)
 
-    # Join them with a clear separator
     return "\n\n".join(prompt_parts)
 
 
@@ -306,7 +302,6 @@ def main(
     console = Console()
     errorConsole = Console(stderr=True)
     total_in_tokens, total_out_tokens = 0, 0
-    # --- MODIFIED: Check if stdout is an interactive terminal ---
     is_interactive = sys.stdout.isatty()
 
     if edit_agent:
@@ -367,32 +362,45 @@ def main(
                 api_kwargs["tool_choice"] = "auto"
                 if i == max_tool_turns - 1:
                     api_kwargs["tool_choice"] = "none"
+            
+            # --- START: FIXED STREAMING LOGIC ---
+            stream = client.chat.completions.create(**api_kwargs)
+            full_content = ""
+            tool_call_builder = StreamingToolCallBuilder()
 
-            # --- MODIFIED: Use a spinner only in interactive mode ---
-            spinner_context = (
-                Live(
-                    Spinner("dots", text=f"[grey]{api_model}[/grey]..."),
+            if is_interactive:
+                with Live(
+                    Spinner("dots", text=f" [grey]{api_model}[/grey]..."),
                     console=console,
                     auto_refresh=True,
-                    transient=True,
-                )
-                if is_interactive
-                else open(os.devnull, "w")  # Suppress output when not interactive
-            )
+                    vertical_overflow="visible",
+                ) as live:
+                    for chunk in stream:
+                        if chunk.usage:
+                            total_in_tokens += getattr(chunk.usage, "prompt_tokens", 0)
+                            total_out_tokens += getattr(
+                                chunk.usage, "completion_tokens", 0
+                            )
 
-            with spinner_context:
-                stream = client.chat.completions.create(**api_kwargs)
-                full_content = ""
-                tool_call_builder = StreamingToolCallBuilder()
+                        delta = chunk.choices[0].delta
+                        full_content += delta.content or ""
+                        tool_call_builder.accumulate(delta)
+                        
+                        # Update the live display, replacing the spinner on the first run
+                        live.update(Markdown(fix_rtl_output(full_content)))
+            else:
+                # Non-interactive: just accumulate the content without live rendering
                 for chunk in stream:
                     if chunk.usage:
                         total_in_tokens += getattr(chunk.usage, "prompt_tokens", 0)
-                        total_out_tokens += getattr(chunk.usage, "completion_tokens", 0)
+                        total_out_tokens += getattr(
+                            chunk.usage, "completion_tokens", 0
+                        )
 
                     delta = chunk.choices[0].delta
                     full_content += delta.content or ""
                     tool_call_builder.accumulate(delta)
-                    # --- REMOVED: Live update logic from here ---
+            # --- END: FIXED STREAMING LOGIC ---
 
             assistant_tool_calls = tool_call_builder.tool_calls
             assistant_message = {
@@ -403,17 +411,10 @@ def main(
             messages.append(assistant_message)
 
             if not assistant_tool_calls:
-                # --- MODIFIED: Conditional output rendering ---
-                if is_interactive:
-                    # For terminals, render rich Markdown
-                    console.print(Markdown(fix_rtl_output(full_content)))
-                else:
-                    # For pipes/files, print raw text. end="" prevents extra newline.
+                if not is_interactive:
                     print(full_content, end="")
-                break  # Exit loop if no more tools are called
+                break
 
-            # Process tool calls
-            # --- MODIFIED: Print tool call info to stderr ---
             errorConsole.print("[dim]Tool call(s) requested...[/dim]")
             for tool_call in assistant_tool_calls:
                 function_name = tool_call["function"]["name"]
@@ -427,7 +428,6 @@ def main(
                             f"Tool '{function_name}' not found in AVAILABLE_TOOLS."
                         )
 
-                    # --- REMOVED: Interactive handler logic is gone ---
                     if tool_func := tool_info.get("function"):
                         errorConsole.print(
                             f"[dim]Performing: [cyan]{function_name}[/cyan] with args: {args_dict}[/dim]",
