@@ -38,7 +38,7 @@ from ddgs import DDGS
 DEFAULT_LOCAL_API_URL = "http://localhost:1234/v1"
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant inside a terminal. Keep your responses short and concise."
 
-# --- Tool Definition ---
+# --- Tool Definitions and Mappings ---
 search_tool_definition = {
     "type": "function",
     "function": {
@@ -55,6 +55,30 @@ search_tool_definition = {
             "required": ["query"],
         },
     },
+}
+
+
+def perform_web_search(query: str, num_results: int = 10) -> str:
+    """Performs a web search using DuckDuckGo and returns formatted results."""
+    try:
+        results = DDGS().text(query, max_results=num_results)
+        if not results:
+            return "No results found for the query."
+        formatted_results = [
+            f"**Source {i + 1}: {r['title']}**\nSnippet: {r['body']}\nURL: {r['href']}"
+            for i, r in enumerate(results)
+        ]
+        return "\n\n---\n\n".join(formatted_results)
+    except Exception as e:
+        return f"An error occurred during web search: {e}"
+
+
+# Central registry for tools and their corresponding functions
+AVAILABLE_TOOLS = {
+    "web_search": {
+        "definition": search_tool_definition,
+        "function": perform_web_search,
+    }
 }
 
 
@@ -112,21 +136,6 @@ def fix_rtl_output(text: str) -> str:
     reshaped_text = arabic_reshaper.reshape(text)
     bidi_text = get_display(reshaped_text)
     return bidi_text
-
-
-def perform_web_search(query: str, num_results: int = 10) -> str:
-    """Performs a web search using DuckDuckGo and returns formatted results."""
-    try:
-        results = DDGS().text(query, max_results=num_results)
-        if not results:
-            return "No results found for the query."
-        formatted_results = [
-            f"**Source {i + 1}: {r['title']}**\nSnippet: {r['body']}\nURL: {r['href']}"
-            for i, r in enumerate(results)
-        ]
-        return "\n\n---\n\n".join(formatted_results)
-    except Exception as e:
-        return f"An error occurred during web search: {e}"
 
 
 # --- Agent and Context Functions ---
@@ -264,12 +273,12 @@ def main(
         ),
     ] = None,
     # --- API Parameters ---
-    use_search: Annotated[
-        bool,
+    max_tool_turns: Annotated[
+        int,
         typer.Option(
-            "-s", "--use-search", help="Enable the web search tool for the agent."
+            "-l", "--max-tool-turns", help="Maximum number of tool-use turns."
         ),
-    ] = False,
+    ] = 5,
     temperature: Annotated[
         float, typer.Option("-t", "--temperature", help="The sampling temperature.")
     ] = 0.2,
@@ -324,10 +333,16 @@ def main(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": final_user_message},
         ]
-        tools = [search_tool_definition] if use_search else None
+
+        # Make all available tools accessible to the model
+        tools = (
+            [t["definition"] for t in AVAILABLE_TOOLS.values()]
+            if AVAILABLE_TOOLS
+            else None
+        )
 
         # --- Main Tool-Use Loop ---
-        for _ in range(2):  # Allows one tool call turn
+        for i in range(max_tool_turns):
             api_kwargs = {
                 "model": api_model,
                 "messages": messages,
@@ -335,9 +350,13 @@ def main(
                 "top_p": top_p,
                 "stream": True,
             }
+            # Only send tool parameters if tools are available
             if tools:
                 api_kwargs["tools"] = tools
                 api_kwargs["tool_choice"] = "auto"
+                # Prevent the model from calling tools again on the last turn
+                if i == max_tool_turns - 1:
+                    api_kwargs["tool_choice"] = "none"
 
             usage = None
             spinner_text = f"[grey]{api_model}[/grey]..."
@@ -361,7 +380,13 @@ def main(
                     if delta.tool_calls:
                         for tool_call_chunk in delta.tool_calls:
                             if len(tool_calls) <= tool_call_chunk.index:
-                                tool_calls.append(defaultdict(str))
+                                tool_calls.append(
+                                    {
+                                        "id": "",
+                                        "function_name": "",
+                                        "function_args": "",
+                                    }
+                                )
 
                             call = tool_calls[tool_call_chunk.index]
                             call["id"] += tool_call_chunk.id or ""
@@ -375,11 +400,10 @@ def main(
                             Markdown(fix_rtl_output(full_delta["content"])),
                             refresh=True,
                         )
-            
+
             if usage:
                 total_in_tokens += getattr(usage, "prompt_tokens", 0)
                 total_out_tokens += getattr(usage, "completion_tokens", 0)
-
 
             assistant_message = {"role": "assistant"}
             if full_delta["content"]:
@@ -387,60 +411,61 @@ def main(
 
             if tool_calls:
                 console.print("[dim]Tool call requested by model...[/dim]")
-                assistant_message["tool_calls"] = []
-                for tc in tool_calls:
-                    assistant_message["tool_calls"].append(
-                        {
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {
-                                "name": tc["function_name"],
-                                "arguments": tc["function_args"],
-                            },
-                        }
-                    )
+                assistant_message["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function_name"],
+                            "arguments": tc["function_args"],
+                        },
+                    }
+                    for tc in tool_calls
+                ]
                 messages.append(assistant_message)
 
                 for tool_call in assistant_message["tool_calls"]:
                     function_name = tool_call["function"]["name"]
-                    if function_name == "web_search":
+                    function_to_call = AVAILABLE_TOOLS.get(function_name, {}).get(
+                        "function"
+                    )
+
+                    if not function_to_call:
+                        console.print(
+                            f"[bold red]Error: Unknown tool '{function_name}' called by the model.[/bold red]"
+                        )
+                        tool_output = (
+                            f"Error: The tool '{function_name}' does not exist."
+                        )
+                    else:
                         try:
                             args_dict = json.loads(tool_call["function"]["arguments"])
-                            query = args_dict.get("query")
                             console.print(
-                                f"[dim]Performing web search for: [cyan]{query}[/cyan][/dim]"
+                                f"[dim]Performing: [cyan]{function_name}[/cyan] with args: {args_dict}[/dim]"
                             )
-                            tool_output = perform_web_search(query)
-                            messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_call["id"],
-                                    "content": tool_output,
-                                }
-                            )
-                        except json.JSONDecodeError:
+                            tool_output = function_to_call(**args_dict)
+                        except (json.JSONDecodeError, TypeError) as e:
                             console.print(
-                                "[bold red]Error decoding tool arguments.[/bold red]"
+                                f"[bold red]Error calling tool '{function_name}': {e}[/bold red]"
                             )
-                            messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_call["id"],
-                                    "content": "Error: Invalid JSON in arguments.",
-                                }
-                            )
+                            tool_output = f"Error: Invalid arguments provided for {function_name}: {e}"
 
-                tools = None
-                continue
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": tool_output,
+                        }
+                    )
+                continue  # Go to the next iteration of the loop to get the final response
 
+            # If no tool calls were made, print the response and exit the loop
             console.print(Markdown(fix_rtl_output(full_delta["content"])))
             break
 
         total_tokens = total_in_tokens + total_out_tokens
         if total_tokens > 0:
-            console.print(
-                f"\n[dim]->:{total_in_tokens} <-:{total_out_tokens}"
-            )
+            console.print(f"\n[dim]->:{total_in_tokens} <-:{total_out_tokens}")
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user.[/yellow]")
