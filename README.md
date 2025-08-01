@@ -44,15 +44,6 @@ Persona files live in ~/.config/lm/ (or $XDG_CONFIG_HOME/lm/). Examples: coder.m
 When an agent is used, today’s date is appended to the system prompt.
 
 ## Usage
-```sh
-ctx -i .git -i node_modules . py md
-lm -c "Summarize the repo and outline TODOs"
-```
-
-Or with -s flag of ctx to output to stdout:
-  ```sh
-  ctx -s -i .git -i node_modules . py md | lm -c "Summarize the repo and outline TODOs"
-  ```
 Generate a git commit message:
 ```sh
     git diff HEAD | lm "generate a git commit"
@@ -77,6 +68,17 @@ Generate a readme:
 ctx . rs -i target -i .devbox -s | lm "generate a readme for this project" > readme.md
 ```
 
+Summarize a repo:
+```sh
+ctx -i .git -i node_modules . py md
+lm -c "Summarize the repo and outline TODOs"
+```
+
+Or with -s flag of ctx to output to stdout:
+  ```sh
+  ctx -s -i .git -i node_modules . py md | lm -c "Summarize the repo and outline TODOs"
+  ```
+
 ## Options
 ```sh
 - prompt (arg)              User prompt; if omitted, reads from stdin
@@ -100,13 +102,6 @@ The client supports OpenAI function-calling tools.
 1) web_search
    - Uses DuckDuckGo (ddgs)
    - Returns sources with titles, snippets, URLs
-
-2) write_to_file
-   - Creates a new file with provided content
-   - Interactive preview, syntax highlighting; confirm with y/Enter, cancel with n/Esc
-   - Fails if the target file already exists
-
-You’ll see a notice when tools are invoked.
 
 ## Token Counters
 At end of run, prints token counts if available, e.g. ->:123 <-:456
