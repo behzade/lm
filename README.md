@@ -23,11 +23,13 @@ Config path:
 - Linux/macOS: $XDG_CONFIG_HOME/lm/config.json or ~/.config/lm/config.json
 
 First run creates default:
+```json
 {
   "model": "local-model",
   "api_url": "http://localhost:1234/v1",
   "api_key_var": "sk-dummy"
 }
+```
 - model: Target model name
 - api_url: OpenAI‑compatible base URL (LM Studio, llama.cpp server, proxies)
 - api_key_var: Env var name for API key; if "sk-dummy", no env var required
@@ -42,23 +44,41 @@ Persona files live in ~/.config/lm/ (or $XDG_CONFIG_HOME/lm/). Examples: coder.m
 When an agent is used, today’s date is appended to the system prompt.
 
 ## Usage
-Basic:
-  echo "Explain RAG" | lm
-  lm "Write a bash script to list large files"
+```sh
+ctx -i .git -i node_modules . py md
+lm -c "Summarize the repo and outline TODOs"
+```
 
-Add context:
-  lm -f README.md -f main.py -c "Summarize"
+Or with -s flag of ctx to output to stdout:
+  ```sh
+  ctx -s -i .git -i node_modules . py md | lm -c "Summarize the repo and outline TODOs"
+  ```
+Generate a git commit message:
+```sh
+    git diff HEAD | lm "generate a git commit"
+```
+Tldr for man pages:
+```sh
+man find | lm "how do I find all go files excluding test ones"
+```
 
-Choose model and API URL:
-  lm -m mistral -u http://localhost:8080/v1 "Summarize this"
+Filter through docker logs:
+```sh
+docker compose logs worker --tail 200 | lm "filter critical failures into a table"
+```
 
-Sampling:
-  lm -t 0.2 -p 0.95 "Give me 3 ideas"
+Translate:
+```sh
+lm -c -a translator "Translate this to italian"
+```
 
-Limit tool turns (for tool‑augmented tasks):
-  lm -l 3 "Find latest release notes for project X and save a summary"
+Generate a readme:
+```sh
+ctx . rs -i target -i .devbox -s | lm "generate a readme for this project" > readme.md
+```
 
 ## Options
+```sh
 - prompt (arg)              User prompt; if omitted, reads from stdin
 - -f, --file PATH           Include file content (repeatable)
 - -c, --from-clipboard      Include system clipboard content
@@ -69,6 +89,7 @@ Limit tool turns (for tool‑augmented tasks):
 - -l, --max-tool-turns N    Max tool-use turns (default: 5)
 - -t, --temperature FLOAT   Sampling temperature (default: 0.2)
 - -p, --top-p FLOAT         Nucleus sampling p (default: 0.95)
+```
 
 ## Streaming, Markdown, RTL
 Live streaming with spinner. Renders Markdown and code with syntax highlighting. RTL languages (e.g., Farsi/Arabic) are reshaped/reordered for terminals lacking native RTL support.
@@ -102,36 +123,3 @@ Readable messages are shown for file/clipboard issues.
 
 ## Related: ctx
 The companion ctx script recursively gathers files by extension, filters paths, and copies aggregate text to the clipboard—useful for assembling context before lm.
-Example:
-  ```sh
-  ctx -i .git -i node_modules . py md
-  lm -c "Summarize the repo and outline TODOs"
-  ```
-
-Or with -s flag of ctx to output to stdout:
-  ```sh
-  ctx -s -i .git -i node_modules . py md | lm -c "Summarize the repo and outline TODOs"
-  ```
-Generate a git commit message:
-```sh
-    git diff HEAD | lm "generate a git commit"
-```
-Tldr for man pages:
-```sh
-man find | lm "how do I find all go files excluding test ones"
-```
-
-Filter through docker logs:
-```sh
-docker compose logs worker --tail 200 | lm "filter critical failures into a table"
-```
-
-Translate:
-```sh
-lm -c -a translator "Translate this to italian"
-```
-
-Generate a readme:
-```sh
-ctx . rs -i target -i .devbox -s | lm "generate a readme for this project" > readme.md
-```
