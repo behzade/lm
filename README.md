@@ -103,8 +103,35 @@ Readable messages are shown for file/clipboard issues.
 ## Related: ctx
 The companion ctx script recursively gathers files by extension, filters paths, and copies aggregate text to the clipboard—useful for assembling context before lm.
 Example:
+  ```sh
   ctx -i .git -i node_modules . py md
   lm -c "Summarize the repo and outline TODOs"
+  ```
 
 Or with -s flag of ctx to output to stdout:
+  ```sh
   ctx -s -i .git -i node_modules . py md | lm -c "Summarize the repo and outline TODOs"
+  ```
+Generate a git commit message:
+```sh
+    git diff HEAD | lm "generate a git commit"
+```
+Tldr for man pages:
+```sh
+man find | lm "how do I find all go files excluding test ones"
+```
+
+Filter through docker logs:
+```sh
+docker compose logs worker --tail 200 | lm "filter critical failures into a table"
+```
+
+Translate:
+```sh
+lm -c -a translator "Translate this to italian"
+```
+
+Generate a readme:
+```sh
+ctx . rs -i target -i .devbox -s | lm "generate a readme for this project" > readme.md
+```
