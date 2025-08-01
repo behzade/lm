@@ -209,7 +209,7 @@ def build_context(
 app = typer.Typer(
     add_completion=False,
     help="A command-line chatbot that uses agent profiles, files, and the clipboard as context.",
-    no_args_is_help=True,
+    no_args_is_help=False,
 )
 
 
@@ -278,6 +278,8 @@ def main(
     ] = 0.95,
 ):
     console = Console()
+    total_in_tokens = 0
+    total_out_tokens = 0
 
     # Handle the agent editing mode
     if edit_agent:
@@ -337,6 +339,7 @@ def main(
                 api_kwargs["tools"] = tools
                 api_kwargs["tool_choice"] = "auto"
 
+            usage = None
             spinner_text = f"[grey]{api_model}[/grey]..."
             with Live(
                 Spinner("dots", text=spinner_text),
@@ -349,6 +352,9 @@ def main(
                 full_delta = defaultdict(str)
                 tool_calls = []
                 for chunk in stream:
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+
                     delta = chunk.choices[0].delta
                     full_delta["content"] += delta.content or ""
 
@@ -369,6 +375,11 @@ def main(
                             Markdown(fix_rtl_output(full_delta["content"])),
                             refresh=True,
                         )
+            
+            if usage:
+                total_in_tokens += getattr(usage, "prompt_tokens", 0)
+                total_out_tokens += getattr(usage, "completion_tokens", 0)
+
 
             assistant_message = {"role": "assistant"}
             if full_delta["content"]:
@@ -424,6 +435,12 @@ def main(
 
             console.print(Markdown(fix_rtl_output(full_delta["content"])))
             break
+
+        total_tokens = total_in_tokens + total_out_tokens
+        if total_tokens > 0:
+            console.print(
+                f"\n[dim]->:{total_in_tokens} <-:{total_out_tokens}"
+            )
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Operation cancelled by user.[/yellow]")
