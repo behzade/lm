@@ -9,6 +9,7 @@
 #     "python-bidi",
 #     "ddgs",
 #     "typer[all]",
+#     "readchar",
 # ]
 # ///
 
@@ -17,13 +18,13 @@ import json
 import os
 import subprocess
 import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 from pathlib import Path
-from collections import defaultdict
 
 import openai
 import pyperclip
 import typer
+import readchar
 from typer import Abort
 from typing_extensions import Annotated
 from rich.console import Console
@@ -40,7 +41,75 @@ from ddgs import DDGS
 DEFAULT_LOCAL_API_URL = "http://localhost:1234/v1"
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant inside a terminal. Keep your responses short and concise. When asked to create a file, first use the write_to_file tool, then report the result to the user."
 
-# --- Tool Definitions and Mappings ---
+
+def confirm_no_enter(prompt: str, console: Console) -> bool:
+    """Asks for confirmation with y/n/Enter/Esc without requiring a final Enter."""
+    # Add the hint for the user
+    console.print(f"{prompt} [y/Enter, n/Esc] ", end="")
+
+    # Ensure the prompt is displayed immediately by flushing the console's buffer
+    if hasattr(console.file, "flush"):
+        console.file.flush()
+
+    while True:  # Loop until a valid key is pressed
+        try:
+            key = readchar.readkey()
+
+            # --- Affirmative keys ---
+            if key.lower() == "y" or key == readchar.key.ENTER:
+                if key == readchar.key.ENTER:
+                    console.print("↵")  # Visual feedback for Enter
+                else:
+                    console.print(key)  # Echo 'y' or 'Y'
+                return True
+
+            # --- Negative keys ---
+            # Added a direct check for the byte '\x1b' for robustness
+            if key.lower() == "n" or key == readchar.key.ESC or key == "\x1b":
+                if key == readchar.key.ESC or key == "\x1b":
+                    console.print("Esc")  # Visual feedback for Escape
+                else:
+                    console.print(key)  # Echo 'n' or 'N'
+                return False
+
+            # Any other key is ignored, and the loop continues
+        except (KeyboardInterrupt, EOFError):
+            console.print("\nCancelled.")
+            return False
+
+
+class StreamingToolCallBuilder:
+    """Reconstructs tool calls from a streaming API response."""
+
+    def __init__(self):
+        self._tool_calls: List[Dict[str, Any]] = []
+
+    def accumulate(self, delta: Any):
+        if not delta or not delta.tool_calls:
+            return
+
+        for tc in delta.tool_calls:
+            if len(self._tool_calls) <= tc.index:
+                self._tool_calls.append(
+                    {
+                        "id": "",
+                        "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    }
+                )
+
+            call = self._tool_calls[tc.index]
+            call["id"] += tc.id or ""
+            if tc.function:
+                call["function"]["name"] += tc.function.name or ""
+                call["function"]["arguments"] += tc.function.arguments or ""
+
+    @property
+    def tool_calls(self) -> List[Dict[str, Any]]:
+        return self._tool_calls
+
+
+# --- Tool Definitions and Handlers ---
 
 
 def perform_web_search(query: str, num_results: int = 10) -> str:
@@ -59,7 +128,7 @@ def perform_web_search(query: str, num_results: int = 10) -> str:
 
 
 def _perform_write_to_file(filename: str, content: str) -> str:
-    """(Internal) Writes content to a file after checks are complete."""
+    """(Internal) Writes content to a file after checks and confirmation."""
     try:
         path = Path(filename)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,52 +138,85 @@ def _perform_write_to_file(filename: str, content: str) -> str:
         return f"Error: Could not write to file '{filename}'. Reason: {e}"
 
 
-search_tool_definition = {
-    "type": "function",
-    "function": {
-        "name": "web_search",
-        "description": "Performs a web search to get up-to-date information or context.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "The search query."}
-            },
-            "required": ["query"],
-        },
-    },
-}
+def handle_write_to_file_interactive(
+    console: Console, filename: str, content: str
+) -> str:
+    """Interactive handler for the write_to_file tool."""
+    if Path(filename).exists():
+        return f"Error: File '{filename}' already exists. Operation aborted."
 
-write_tool_definition = {
-    "type": "function",
-    "function": {
-        "name": "write_to_file",
-        "description": "Proposes to write content to a new local file. Fails if the file already exists.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "filename": {
-                    "type": "string",
-                    "description": "The path and name for the new file (e.g., 'src/main.py').",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The full content to write into the file.",
-                },
-            },
-            "required": ["filename", "content"],
-        },
-    },
-}
+    console.print(
+        f"\n[bold]Model wants to create file:[/] [yellow]'{filename}'[/yellow]"
+    )
+
+    # Dynamic syntax highlighting
+    lexer = "text"
+    ext = Path(filename).suffix.lower()
+    lexer_map = {
+        ".py": "python",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".html": "html",
+        ".css": "css",
+        ".json": "json",
+        ".md": "markdown",
+        ".sh": "shell",
+        ".rb": "ruby",
+    }
+    if ext in lexer_map:
+        lexer = lexer_map[ext]
+
+    syntax = Syntax(content, lexer, theme="monokai", line_numbers=True)
+    console.print(syntax)
+
+    if confirm_no_enter("Create this file?", console):
+        return _perform_write_to_file(filename, content)
+    else:
+        return "User cancelled the operation."
+
 
 # Central registry for tools
-AVAILABLE_TOOLS = {
+AVAILABLE_TOOLS: Dict[str, Dict[str, Any]] = {
     "web_search": {
-        "definition": search_tool_definition,
+        "definition": {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Performs a web search to get up-to-date information or context.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query."}
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
         "function": perform_web_search,
     },
     "write_to_file": {
-        "definition": write_tool_definition,
-        "function": _perform_write_to_file,
+        "definition": {
+            "type": "function",
+            "function": {
+                "name": "write_to_file",
+                "description": "Proposes to write content to a new local file. Fails if the file already exists.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": "The path and name for the new file (e.g., 'src/main.py').",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The full content to write into the file.",
+                        },
+                    },
+                    "required": ["filename", "content"],
+                },
+            },
+        },
+        "interactive_handler": handle_write_to_file_interactive,
     },
 }
 
@@ -166,11 +268,11 @@ def get_config_path() -> Path:
 
 # --- Core Functions ---
 def fix_rtl_output(text: str) -> str:
+    """Reshapes and reorders text for correct display in terminals that don't support RTL."""
     reshaped_text = arabic_reshaper.reshape(text)
     return get_display(reshaped_text)
 
 
-# --- Agent and Context Functions ---
 def edit_agent_profile(console: Console, agent_name: str):
     prompt_path = get_config_path() / f"{agent_name}.md"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -313,15 +415,14 @@ def main(
         base_url = api_url or config_manager.get("api_url")
         api_model = model or config_manager.get("model")
         api_key_var = config_manager.get("api_key_var", "sk-dummy")
-        api_key = (
-            os.getenv(api_key_var, "sk-dummy")
-            if api_key_var != "sk-dummy"
-            else "sk-dummy"
-        )
 
-        if not api_key and api_key_var != "sk-dummy":
+        api_key = "sk-dummy"
+        if api_key_var != "sk-dummy":
+            api_key = os.getenv(api_key_var)
+
+        if not api_key:
             console.print(
-                f"[bold red]Error:[/bold red] Environment variable '{api_key_var}' is not set."
+                f"[bold red]Error:[/bold red] Environment variable '{api_key_var}' is not set and is required."
             )
             raise typer.Exit(code=1)
 
@@ -371,111 +472,72 @@ def main(
                 transient=True,
             ) as live:
                 stream = client.chat.completions.create(**api_kwargs)
-                full_delta = defaultdict(str)
-                tool_calls = []
+                full_content = ""
+                tool_call_builder = StreamingToolCallBuilder()
                 for chunk in stream:
                     if chunk.usage:
                         total_in_tokens += getattr(chunk.usage, "prompt_tokens", 0)
                         total_out_tokens += getattr(chunk.usage, "completion_tokens", 0)
+
                     delta = chunk.choices[0].delta
-                    full_delta["content"] += delta.content or ""
-                    if delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            if len(tool_calls) <= tc.index:
-                                tool_calls.append(
-                                    {"id": "", "function_name": "", "function_args": ""}
-                                )
-                            call = tool_calls[tc.index]
-                            call["id"] += tc.id or ""
-                            if tc.function:
-                                call["function_name"] += tc.function.name or ""
-                                call["function_args"] += tc.function.arguments or ""
-                    if not tool_calls:
+                    full_content += delta.content or ""
+                    tool_call_builder.accumulate(delta)
+
+                    if not tool_call_builder.tool_calls:
                         live.update(
-                            Markdown(fix_rtl_output(full_delta["content"])),
-                            refresh=True,
+                            Markdown(fix_rtl_output(full_content)), refresh=True
                         )
 
+            assistant_tool_calls = tool_call_builder.tool_calls
             assistant_message = {
                 "role": "assistant",
-                "content": full_delta["content"] or None,
+                "content": full_content or None,
+                "tool_calls": assistant_tool_calls if assistant_tool_calls else None,
             }
-            if tool_calls:
-                console.print("[dim]Tool call requested by model...[/dim]")
-                assistant_message["tool_calls"] = [
+            messages.append(assistant_message)
+
+            if not assistant_tool_calls:
+                console.print(Markdown(fix_rtl_output(full_content)))
+                break  # Exit loop if no more tools are called
+
+            # Process tool calls
+            console.print("[dim]Tool call(s) requested by model...[/dim]")
+            for tool_call in assistant_tool_calls:
+                function_name = tool_call["function"]["name"]
+                tool_output = f"Error: Unknown tool '{function_name}'."
+                try:
+                    args_dict = json.loads(tool_call["function"]["arguments"])
+                    tool_info = AVAILABLE_TOOLS.get(function_name)
+
+                    if not tool_info:
+                        raise ValueError(
+                            f"Tool '{function_name}' not found in AVAILABLE_TOOLS."
+                        )
+
+                    if handler := tool_info.get("interactive_handler"):
+                        tool_output = handler(console=console, **args_dict)
+                    elif tool_func := tool_info.get("function"):
+                        console.print(
+                            f"[dim]Performing: [cyan]{function_name}[/cyan] with args: {args_dict}[/dim]"
+                        )
+                        tool_output = tool_func(**args_dict)
+                    else:
+                        raise ValueError(
+                            f"No valid function or handler for tool '{function_name}'."
+                        )
+
+                except json.JSONDecodeError as e:
+                    tool_output = f"Error decoding tool arguments: {e}"
+                except (TypeError, ValueError, Abort) as e:
+                    tool_output = f"Error during tool execution: {e}"
+
+                messages.append(
                     {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["function_name"],
-                            "arguments": tc["function_args"],
-                        },
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": tool_output,
                     }
-                    for tc in tool_calls
-                ]
-                messages.append(assistant_message)
-
-                for tool_call in assistant_message["tool_calls"]:
-                    function_name = tool_call["function"]["name"]
-                    tool_output = f"Error: Unknown tool '{function_name}'."
-                    try:
-                        args_dict = json.loads(tool_call["function"]["arguments"])
-
-                        if function_name == "write_to_file":
-                            filename = args_dict.get("filename")
-                            content = args_dict.get("content")
-                            if not filename or content is None:
-                                tool_output = (
-                                    "Error: 'filename' and 'content' are required."
-                                )
-                            elif Path(filename).exists():
-                                tool_output = (
-                                    f"Error: File '{filename}' already exists."
-                                )
-                            else:
-                                console.print(
-                                    f"\n[bold]Model wants to create file:[/] [yellow]'{filename}'[/yellow]"
-                                )
-                                syntax = Syntax(
-                                    content,
-                                    "python",
-                                    theme="monokai",
-                                    line_numbers=True,
-                                )  # Assumes python, adjust as needed
-                                console.print(syntax)
-                                try:
-                                    if typer.confirm("Create this file?"):
-                                        tool_output = _perform_write_to_file(
-                                            filename, content
-                                        )
-                                    else:
-                                        tool_output = "User cancelled the operation."
-                                except Abort:
-                                    tool_output = "User cancelled the operation."
-
-                        elif function_name in AVAILABLE_TOOLS:
-                            console.print(
-                                f"[dim]Performing: [cyan]{function_name}[/cyan] with args: {args_dict}[/dim]"
-                            )
-                            tool_function = AVAILABLE_TOOLS[function_name]["function"]
-                            tool_output = tool_function(**args_dict)
-
-                    except json.JSONDecodeError as e:
-                        tool_output = f"Error decoding tool arguments: {e}"
-                    except (TypeError, Abort) as e:
-                        tool_output = f"Error during tool execution: {e}"
-
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call["id"],
-                            "content": tool_output,
-                        }
-                    )
-                continue
-
-            console.print(Markdown(fix_rtl_output(full_delta["content"])))
-            break
+                )
 
         if (total_in_tokens + total_out_tokens) > 0:
             console.print(f"\n[dim]->:{total_in_tokens} <-:{total_out_tokens}[/dim]")
