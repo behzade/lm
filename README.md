@@ -7,7 +7,7 @@ A single‑file terminal client for chatting with OpenAI‑compatible APIs. Desi
 - Add context from files (-f) and clipboard (-c)
 - Agent personas (-a) stored in ~/.config/lm/ (or $XDG_CONFIG_HOME/lm/); edit with -e
 - Clean TUI: spinners, syntax highlighting, RTL text support
-- Tool use: web_search and write_to_file with interactive confirmation
+- Tool use: web_search
 - Self‑contained via uv runner (deps auto‑installed)
 
 ## Installation
