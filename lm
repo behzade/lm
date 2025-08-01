@@ -2,11 +2,12 @@
 # /// script
 # requires-python = ">=3.8"
 # dependencies = [
-#   "requests",
-#   "rich",
-#   "pyperclip",
-#   "arabic_reshaper",
-#   "python-bidi",
+#     "openai",
+#     "rich",
+#     "pyperclip",
+#     "arabic_reshaper",
+#     "python-bidi",
+#     "ddgs",
 # ]
 # ///
 
@@ -15,18 +16,41 @@ import json
 import os
 import argparse
 import subprocess
-from typing import Generator, Optional, List
+import datetime
+from typing import Optional, List
 from pathlib import Path
 
-import requests
+import openai
 import pyperclip
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.spinner import Spinner
+from collections import defaultdict
 
 import arabic_reshaper
 from bidi.algorithm import get_display
+from ddgs import DDGS
+
+# --- Tool Definition ---
+# This defines the web_search tool according to the OpenAI tool-use specification.
+search_tool_definition = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "Performs a web search using DuckDuckGo to get up-to-date information or context about recent events, or specific facts.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query to send to the search engine.",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+}
 
 
 def fix_rtl_output(text: str) -> str:
@@ -35,17 +59,37 @@ def fix_rtl_output(text: str) -> str:
     bidi_text = get_display(reshaped_text)
     return bidi_text
 
+
 # --- Default Configuration ---
-DEFAULT_API_URL = "http://localhost:1234/v1/chat/completions"
+DEFAULT_API_URL = "http://localhost:1234/v1"
 DEFAULT_MODEL = "google/gemma-3-4b"
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant inside a terminal. Keep your responses short and concise."
 
+
 def get_config_path() -> Path:
     """Gets the base configuration directory respecting XDG standards."""
-    xdg_config_home = os.getenv('XDG_CONFIG_HOME')
+    xdg_config_home = os.getenv("XDG_CONFIG_HOME")
     if xdg_config_home:
         return Path(xdg_config_home)
     return Path.home() / ".config"
+
+
+def perform_web_search(query: str, num_results: int = 10) -> str:
+    """Performs a web search using DuckDuckGo and returns formatted results."""
+    # This function is now simpler and just returns the data.
+    try:
+        results = DDGS().text(query, max_results=num_results)
+        if not results:
+            return "No results found for the query."
+
+        formatted_results = [
+            f"**Source {i + 1}: {r['title']}**\nSnippet: {r['body']}\nURL: {r['href']}"
+            for i, r in enumerate(results)
+        ]
+        return "\n\n---\n\n".join(formatted_results)
+    except Exception as e:
+        return f"An error occurred during web search: {e}"
+
 
 def create_arg_parser() -> argparse.ArgumentParser:
     """Creates and configures the argument parser."""
@@ -53,164 +97,284 @@ def create_arg_parser() -> argparse.ArgumentParser:
         description="A command-line chatbot that uses agent profiles, files, and the clipboard as context.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("prompt", nargs="?", default=None, help="The user prompt. Reads from stdin if not provided.")
-    parser.add_argument("-m", "--model", default=os.getenv("CHAT_MODEL", DEFAULT_MODEL), help="The model to use.")
-    parser.add_argument("-u", "--api-url", default=os.getenv("CHAT_API_URL", DEFAULT_API_URL), help="The API endpoint URL.")
-    parser.add_argument("-t", "--temperature", type=float, default=0.2, help="The sampling temperature.")
-    parser.add_argument("-p", "--top-p", type=float, default=0.95, help="The nucleus sampling probability.")
-    parser.add_argument("-f", "--file", action="append", help="Path to a file to add to the context. Can be used multiple times.")
-    parser.add_argument("-c", "--from-clipboard", action="store_true", help="Add the content of the clipboard to the context.")
-    # --- Agent Arguments ---
+    parser.add_argument(
+        "prompt",
+        nargs="?",
+        default=None,
+        help="The user prompt. Reads from stdin if not provided.",
+    )
+    parser.add_argument(
+        "-m",
+        "--model",
+        default=os.getenv("CHAT_MODEL", DEFAULT_MODEL),
+        help="The model to use.",
+    )
+    parser.add_argument(
+        "-u",
+        "--api-url",
+        default=os.getenv("CHAT_API_URL", DEFAULT_API_URL),
+        help="The API endpoint URL.",
+    )
+    parser.add_argument(
+        "-t", "--temperature", type=float, default=0.2, help="The sampling temperature."
+    )
+    parser.add_argument(
+        "-p",
+        "--top-p",
+        type=float,
+        default=0.95,
+        help="The nucleus sampling probability.",
+    )
+    # MODIFIED: New flag to enable the search tool
+    parser.add_argument(
+        "-s",
+        "--use-search",
+        action="store_true",
+        help="Enable the web search tool for the agent.",
+    )
+    parser.add_argument(
+        "-f",
+        "--file",
+        action="append",
+        help="Path to a file to add to the context. Can be used multiple times.",
+    )
+    parser.add_argument(
+        "-c",
+        "--from-clipboard",
+        action="store_true",
+        help="Add the content of the clipboard to the context.",
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("-a", "--agent", help="Name of the agent profile to load.")
-    group.add_argument("-e", "--edit-agent", metavar="AGENT_NAME", help="Create or edit an agent profile.")
+    group.add_argument(
+        "-e",
+        "--edit-agent",
+        metavar="AGENT_NAME",
+        help="Create or edit an agent profile.",
+    )
     return parser
 
+
 def edit_agent_profile(console: Console, agent_name: str):
-    """Creates or opens an agent profile file in the user's default editor."""
     config_dir = get_config_path()
     agent_dir = config_dir / "lm"
-    
-    # Ensure the ~/.config/lm directory exists
     agent_dir.mkdir(parents=True, exist_ok=True)
-    
     prompt_path = agent_dir / f"{agent_name}.md"
-    editor = os.getenv('EDITOR', 'nano') # Fallback to nano if $EDITOR is not set
-    
-    console.print(f"Opening agent '[cyan]{agent_name}[/cyan]' with [yellow]{editor}[/yellow]...")
+    editor = os.getenv("EDITOR", "nano")
+    console.print(
+        f"Opening agent '[cyan]{agent_name}[/cyan]' with [yellow]{editor}[/yellow]..."
+    )
     console.print(f"File path: [dim]{prompt_path}[/dim]")
-    
     try:
         subprocess.run([editor, str(prompt_path)], check=True)
-    except FileNotFoundError:
-        console.print(f"[bold red]Error:[/bold red] Editor '{editor}' not found. Please set your $EDITOR environment variable.")
-        sys.exit(1)
-    except subprocess.CalledProcessError as e:
-        console.print(f"[bold red]Error:[/bold red] Editor exited with a non-zero status: {e.returncode}")
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
         sys.exit(1)
 
 
 def load_system_prompt(console: Console, agent_name: Optional[str]) -> str:
-    """Loads the system prompt from a file if an agent is specified."""
     if not agent_name:
         return DEFAULT_SYSTEM_PROMPT
-
     config_dir = get_config_path()
     prompt_path = config_dir / "lm" / f"{agent_name}.md"
-
     if not prompt_path.is_file():
-        console.print(f"[bold red]Error:[/bold red] Agent profile not found at '[yellow]{prompt_path}[/yellow]'")
-        console.print(f"Create it by running: [bold]./your_script_name.py --edit-agent {agent_name}[/bold]")
+        console.print(
+            f"[bold red]Error:[/bold red] Agent not found at '[yellow]{prompt_path}[/yellow]'"
+        )
         sys.exit(1)
-    
     try:
-        return prompt_path.read_text(encoding='utf-8')
+        system_prompt = prompt_path.read_text(encoding="utf-8")
+        today = datetime.date.today()
+        return f"{system_prompt}\n\n[bold green]Today's date:[/bold green] {today}"
     except IOError as e:
-        console.print(f"[bold red]Error reading agent profile '{prompt_path}':[/bold red] {e}")
+        console.print(
+            f"[bold red]Error reading agent profile '{prompt_path}':[/bold red] {e}"
+        )
         sys.exit(1)
+
 
 def get_input(prompt_arg: Optional[str]) -> str:
-    if prompt_arg: return prompt_arg
-    if not sys.stdin.isatty(): return sys.stdin.read().strip()
+    if prompt_arg:
+        return prompt_arg
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip()
     return ""
 
-def stream_api_response(session: requests.Session, url: str, payload: dict) -> Generator[str, None, None]:
-    try:
-        with session.post(url, json=payload, stream=True) as response:
-            response.raise_for_status()
-            for line in response.iter_lines():
-                if not line: continue
-                decoded_line = line.decode('utf-8')
-                if not decoded_line.startswith("data: "): continue
-                json_data = decoded_line[len("data: "):].strip()
-                if json_data == "[DONE]": break
-                try:
-                    data_chunk = json.loads(json_data)
-                    content = data_chunk["choices"][0]["delta"].get("content")
-                    if content: yield content
-                except (json.JSONDecodeError, KeyError, IndexError): continue
-    except requests.exceptions.RequestException as e:
-        raise ConnectionError(f"API request failed: {e}") from e
 
-def build_context(console: Console, from_clipboard: bool, files: Optional[List[str]]) -> str:
+def build_context(
+    console: Console, from_clipboard: bool, files: Optional[List[str]]
+) -> str:
     context_parts = []
     if from_clipboard:
         try:
             clipboard_content = pyperclip.paste()
-            if clipboard_content: context_parts.append(f"--- Content from clipboard ---\n{clipboard_content}")
-            else: console.print("[yellow]Warning: Clipboard is empty.[/yellow]", file=sys.stderr)
+            if clipboard_content:
+                context_parts.append(
+                    f"--- Content from clipboard ---\n{clipboard_content}"
+                )
         except pyperclip.PyperclipException as e:
-            console.print(f"[bold red]Clipboard error:[/bold red] {e}. Is a clipboard tool installed?", file=sys.stderr)
+            console.print(f"[bold red]Clipboard error:[/bold red] {e}", file=sys.stderr)
     if files:
         for file_path in files:
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    context_parts.append(f"--- Content from file: {file_path} ---\n{f.read()}")
-            except FileNotFoundError:
-                console.print(f"[bold red]Error:[/bold red] File not found at '{file_path}'", file=sys.stderr)
-                sys.exit(1)
-            except IOError as e:
-                console.print(f"[bold red]Error reading file '{file_path}':[/bold red] {e}", file=sys.stderr)
+                with open(file_path, "r", encoding="utf-8") as f:
+                    context_parts.append(
+                        f"--- Content from file: {file_path} ---\n{f.read()}"
+                    )
+            except (IOError, FileNotFoundError) as e:
+                console.print(
+                    f"[bold red]Error reading file '{file_path}':[/bold red] {e}",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
     return "\n\n".join(context_parts)
+
 
 def main() -> None:
     parser = create_arg_parser()
     args = parser.parse_args()
     console = Console()
-    
-    # --- Handle editing action and exit ---
+
     if args.edit_agent:
         edit_agent_profile(console, args.edit_agent)
         sys.exit(0)
 
-    system_prompt = load_system_prompt(console, args.agent)
-    context_str = build_context(console, args.from_clipboard, args.file)
-    user_prompt = get_input(args.prompt)
-
-    final_user_message = user_prompt
-    if context_str:
-        final_user_message = f"{context_str}\n\n---\n\n{user_prompt}" if user_prompt else context_str
-
-    if not final_user_message:
-        parser.print_help(file=sys.stderr)
-        sys.exit(1)
-
-    headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
-    payload = {
-        "model": args.model,
-        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": final_user_message}],
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-        "stream": True,
-    }
-    
-    buffer = ""
-    session = requests.Session()
-    session.headers.update(headers)
-
     try:
-        spinner = Spinner("dots", " Waiting for response...")
-        with Live(spinner, console=console, auto_refresh=True, transient=True) as live:
-            first_chunk = True
-            for content_chunk in stream_api_response(session, args.api_url, payload):
-                if first_chunk:
-                    live.update(Markdown(""), refresh=True)
-                    first_chunk = False
-                buffer += content_chunk
-                display_text = fix_rtl_output(buffer)
-                live.update(Markdown(display_text), refresh=True)
-    except ConnectionError as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
-        sys.exit(1)
+        client = openai.OpenAI(base_url=args.api_url, api_key="sk-dummy")
+        system_prompt = load_system_prompt(console, args.agent)
+        context_str = build_context(console, args.from_clipboard, args.file)
+        user_prompt = get_input(args.prompt)
+
+        final_user_message = (
+            f"{context_str}\n\n---\n\n{user_prompt}" if context_str else user_prompt
+        )
+        if not final_user_message:
+            parser.print_help(file=sys.stderr)
+            sys.exit(1)
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": final_user_message},
+        ]
+
+        # Define tools if the flag is set
+        tools = [search_tool_definition] if args.use_search else None
+
+        # --- REFACTORED MAIN LOGIC ---
+        # Loop to handle potential tool calls. Max 1 turn for simplicity.
+        for _ in range(2):  # Allows one tool call turn
+            api_kwargs = {
+                "model": args.model,
+                "messages": messages,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "stream": True,
+            }
+            if tools:
+                api_kwargs["tools"] = tools
+                api_kwargs["tool_choice"] = "auto"
+
+            with Live(
+                Spinner("dots", " Waiting for response..."),
+                console=console,
+                auto_refresh=True,
+                transient=True,
+            ) as live:
+                stream = client.chat.completions.create(**api_kwargs)
+
+                # Process the stream to get the full response
+                full_delta = defaultdict(str)
+                tool_calls = []
+                for chunk in stream:
+                    delta = chunk.choices[0].delta
+                    full_delta["content"] += delta.content or ""
+
+                    if delta.tool_calls:
+                        for tool_call_chunk in delta.tool_calls:
+                            if len(tool_calls) <= tool_call_chunk.index:
+                                tool_calls.append(defaultdict(str))
+
+                            call = tool_calls[tool_call_chunk.index]
+                            call["id"] += tool_call_chunk.id or ""
+                            call["function_name"] += tool_call_chunk.function.name or ""
+                            call["function_args"] += (
+                                tool_call_chunk.function.arguments or ""
+                            )
+
+                    # Update spinner text while streaming
+                    if not tool_calls:
+                        live.update(
+                            Markdown(
+                                fix_rtl_output(full_delta["content"]),
+                                "Waiting for response...",
+                            ),
+                            refresh=True,
+                        )
+
+            # After stream, decide what to do
+            assistant_message = {"role": "assistant"}
+            if full_delta["content"]:
+                assistant_message["content"] = full_delta["content"]
+
+            if tool_calls:
+                console.print("[dim]Tool call requested by model...[/dim]")
+                assistant_message["tool_calls"] = []
+                for tc in tool_calls:
+                    assistant_message["tool_calls"].append(
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["function_name"],
+                                "arguments": tc["function_args"],
+                            },
+                        }
+                    )
+                messages.append(assistant_message)
+
+                for tool_call in assistant_message["tool_calls"]:
+                    function_name = tool_call["function"]["name"]
+                    if function_name == "web_search":
+                        try:
+                            args_dict = json.loads(tool_call["function"]["arguments"])
+                            query = args_dict.get("query")
+                            console.print(
+                                f"[dim]Performing web search for: [cyan]{query}[/cyan][/dim]"
+                            )
+                            tool_output = perform_web_search(query)
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call["id"],
+                                    "content": tool_output,
+                                }
+                            )
+                        except json.JSONDecodeError:
+                            console.print(
+                                "[bold red]Error decoding tool arguments.[/bold red]"
+                            )
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call["id"],
+                                    "content": "Error: Invalid JSON in arguments.",
+                                }
+                            )
+
+                tools = None  # Don't allow tool use on the next turn to prevent loops
+                continue  # Go back to the top of the loop to get the final answer
+
+            # If no tool calls, print the content and break
+            console.print(Markdown(fix_rtl_output(full_delta["content"])))
+            break
+
     except KeyboardInterrupt:
-        console.print("\n[yellow]Stream interrupted by user.[/yellow]")
-    finally:
-        if buffer:
-            display_text = fix_rtl_output(buffer)
-            console.print(Markdown(display_text))
-        else:
-            console.print()
+        console.print("\n[yellow]Operation cancelled by user.[/yellow]")
+        sys.exit(130)
+    except openai.APIError as e:
+        console.print(f"[bold red]API Error:[/bold red] {e}")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
