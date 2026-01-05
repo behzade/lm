@@ -1,0 +1,16 @@
+{
+  "name": "lm-tools",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "j": "src/j/index.ts",
+    "ctx": "src/ctx/index.ts",
+    "lm": "src/lm/index.ts"
+  },
+  "dependencies": {
+    "duck-duck-scrape": "^2.2.5",
+    "effect": "^3.10.7",
+    "minimatch": "^9.0.5",
+    "openai": "^4.77.0"
+  }
+}
