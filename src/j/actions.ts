@@ -7,6 +7,11 @@ import { runCommand, runCommandInherit } from "../shared/command";
 const homeDir = os.homedir();
 export const journalDir = path.join(homeDir, "journal");
 export const notesDir = path.join(journalDir, "notes");
+const stateDir =
+  process.env.XDG_CONFIG_HOME
+    ? path.join(process.env.XDG_CONFIG_HOME, "lm")
+    : path.join(homeDir, ".config", "lm");
+const stateFile = path.join(stateDir, "j-state.json");
 
 const normalizeTag = (value: string) =>
   value.replace(/[^A-Za-z0-9_-]/g, "").toLowerCase();
@@ -46,32 +51,72 @@ const readFile = (filePath: string) =>
 
 const statFile = (filePath: string) => Effect.tryPromise(() => fs.stat(filePath));
 
+const recordLastOpened = (filePath: string) =>
+  Effect.tryPromise(async () => {
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(
+      stateFile,
+      JSON.stringify(
+        {
+          lastOpenedPath: filePath,
+          updatedAt: new Date().toISOString(),
+        },
+        null,
+        2
+      )
+    );
+  });
+
+const readLastOpened = () =>
+  Effect.tryPromise(async () => {
+    try {
+      const content = await fs.readFile(stateFile, "utf8");
+      let parsed: { lastOpenedPath?: string } | null = null;
+      try {
+        parsed = JSON.parse(content) as { lastOpenedPath?: string };
+      } catch {
+        return "";
+      }
+      const candidate = parsed?.lastOpenedPath;
+      if (!candidate) {
+        return "";
+      }
+      const exists = await fs
+        .stat(candidate)
+        .then(() => true)
+        .catch(() => false);
+      return exists ? candidate : "";
+    } catch (error: any) {
+      if (error?.code === "ENOENT") {
+        return "";
+      }
+      throw error;
+    }
+  });
+
+const openInEditor = (filePath: string, line?: string | number) =>
+  Effect.gen(function* (_) {
+    yield* _(recordLastOpened(filePath));
+    const args = ["--cmd", "let g:journal_mode=1"];
+    if (line !== undefined) {
+      args.push(`+${line}`);
+    }
+    args.push("+ZenMode", filePath);
+    yield* _(runCommandInherit("nvim", args));
+  });
+
 export const openEntry = (date: string) =>
   Effect.gen(function* (_) {
     const filePath = entryPathForDate(date);
     yield* _(ensureFileExists(filePath, date));
-    yield* _(
-      runCommandInherit("nvim", [
-        "--cmd",
-        "let g:journal_mode=1",
-        "+ZenMode",
-        filePath,
-      ])
-    );
+    yield* _(openInEditor(filePath));
   });
 
 export const openNote = (slug: string) =>
   Effect.gen(function* (_) {
     const filePath = notePathForSlug(slug);
     yield* _(ensureFileExists(filePath, slug));
-    yield* _(
-      runCommandInherit("nvim", [
-        "--cmd",
-        "let g:journal_mode=1",
-        "+ZenMode",
-        filePath,
-      ])
-    );
+    yield* _(openInEditor(filePath));
   });
 
 const readSecondLine = (content: string) => {
@@ -264,14 +309,7 @@ export const searchByDate = (tag?: string) =>
       return;
     }
 
-    yield* _(
-      runCommandInherit("nvim", [
-        "--cmd",
-        "let g:journal_mode=1",
-        "+ZenMode",
-        path.join(journalDir, selection),
-      ])
-    );
+    yield* _(openInEditor(path.join(journalDir, selection)));
   });
 
 export const searchByContent = () =>
@@ -310,15 +348,7 @@ export const searchByContent = () =>
       return;
     }
 
-    yield* _(
-      runCommandInherit("nvim", [
-        "--cmd",
-        "let g:journal_mode=1",
-        `+${line}`,
-        "+ZenMode",
-        file,
-      ])
-    );
+    yield* _(openInEditor(file, line));
   });
 
 export const timelineView = (tag?: string) =>
@@ -352,14 +382,7 @@ export const timelineView = (tag?: string) =>
       return;
     }
 
-    yield* _(
-      runCommandInherit("nvim", [
-        "--cmd",
-        "let g:journal_mode=1",
-        "+ZenMode",
-        path.join(journalDir, `${dateSelected}.md`),
-      ])
-    );
+    yield* _(openInEditor(path.join(journalDir, `${dateSelected}.md`)));
   });
 
 export const tagBrowse = (tag?: string) =>
@@ -403,6 +426,12 @@ export const noteBrowse = (slug?: string) =>
 
 export const openMostRecent = () =>
   Effect.gen(function* (_) {
+    const lastOpened = yield* _(readLastOpened());
+    if (lastOpened) {
+      yield* _(openInEditor(lastOpened));
+      return;
+    }
+
     const files = yield* _(walkMarkdownFiles(journalDir, []));
     if (files.length === 0) {
       return yield* _(Effect.fail(new Error("No entries found.")));
@@ -419,12 +448,154 @@ export const openMostRecent = () =>
       }
     }
 
-    yield* _(
-      runCommandInherit("nvim", [
-        "--cmd",
-        "let g:journal_mode=1",
-        "+ZenMode",
-        bestFile,
-      ])
+    yield* _(openInEditor(bestFile));
+  });
+
+const isDateSlug = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
+
+const stripMarkdownExtension = (value: string) =>
+  value.toLowerCase().endsWith(".md") ? value.slice(0, -3) : value;
+
+const normalizeNoteSlug = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const withoutExt = stripMarkdownExtension(trimmed);
+  if (path.isAbsolute(withoutExt)) {
+    const relative = path.relative(notesDir, withoutExt);
+    if (!relative.startsWith("..")) {
+      return relative;
+    }
+  }
+  if (
+    withoutExt.startsWith(`notes${path.sep}`) ||
+    withoutExt.startsWith("notes/")
+  ) {
+    return withoutExt.replace(/^notes[\\/]/, "");
+  }
+  return withoutExt;
+};
+
+const resolveSource = (source: string) => {
+  const trimmed = source.trim();
+  if (!trimmed) {
+    return { kind: "unknown" as const, id: "" };
+  }
+
+  const withoutExt = stripMarkdownExtension(trimmed);
+  if (path.isAbsolute(withoutExt)) {
+    const relativeToNotes = path.relative(notesDir, withoutExt);
+    if (!relativeToNotes.startsWith("..")) {
+      return { kind: "note" as const, id: relativeToNotes };
+    }
+    const relativeToJournal = path.relative(journalDir, withoutExt);
+    if (!relativeToJournal.startsWith("..")) {
+      const base = path.basename(withoutExt);
+      if (isDateSlug(base)) {
+        return { kind: "entry" as const, id: base };
+      }
+    }
+  }
+
+  if (
+    withoutExt.startsWith(`notes${path.sep}`) ||
+    withoutExt.startsWith("notes/")
+  ) {
+    return { kind: "note" as const, id: withoutExt.replace(/^notes[\\/]/, "") };
+  }
+  if (isDateSlug(withoutExt)) {
+    return { kind: "entry" as const, id: withoutExt };
+  }
+  return { kind: "note" as const, id: withoutExt };
+};
+
+const appendWithSpacing = (existing: string, addition: string) => {
+  if (!existing) {
+    return `${addition}${addition.endsWith("\n") ? "" : "\n"}`;
+  }
+  const separator = existing.endsWith("\n\n")
+    ? ""
+    : existing.endsWith("\n")
+      ? "\n"
+      : "\n\n";
+  return `${existing}${separator}${addition}${addition.endsWith("\n") ? "" : "\n"}`;
+};
+
+export const extractToNote = (options: {
+  source: string;
+  startLine: number;
+  endLine: number;
+  slug: string;
+}) =>
+  Effect.gen(function* (_) {
+    const sourceInfo = resolveSource(options.source);
+    if (sourceInfo.kind === "unknown") {
+      return yield* _(Effect.fail(new Error("Missing source note.")));
+    }
+
+    const targetSlug = normalizeNoteSlug(options.slug);
+    if (!targetSlug) {
+      return yield* _(Effect.fail(new Error("Missing target note slug.")));
+    }
+
+    const sourcePath =
+      sourceInfo.kind === "entry"
+        ? entryPathForDate(sourceInfo.id)
+        : notePathForSlug(sourceInfo.id);
+    const dailyPath =
+      sourceInfo.kind === "entry"
+        ? sourcePath
+        : entryPathForDate(formatDate(new Date()));
+    const targetPath = notePathForSlug(targetSlug);
+
+    const sourceContentResult = yield* _(
+      readFile(sourcePath).pipe(
+        Effect.catchAll((error: any) =>
+          error?.code === "ENOENT"
+            ? Effect.fail(new Error(`Source note not found: ${sourcePath}`))
+            : Effect.fail(error)
+        )
+      )
     );
+
+    const lines = sourceContentResult.split(/\r?\n/);
+    const start = options.startLine;
+    const end = options.endLine;
+
+    if (start < 1 || end < start || end > lines.length) {
+      return yield* _(
+        Effect.fail(
+          new Error(
+            `Invalid line range ${start}-${end} for ${lines.length} lines.`
+          )
+        )
+      );
+    }
+
+    const extractedLines = lines.slice(start - 1, end);
+    const extractedText = extractedLines.join("\n");
+
+    const linkTarget = `notes/${targetSlug}.md`;
+    const linkLine = `[${targetSlug}](${linkTarget})`;
+
+    let nextSourceLines = lines.slice(0, start - 1);
+    if (sourceInfo.kind === "entry") {
+      const indent = extractedLines[0]?.match(/^\s*/)?.[0] ?? "";
+      nextSourceLines.push(`${indent}${linkLine}`);
+    }
+    nextSourceLines = nextSourceLines.concat(lines.slice(end));
+    yield* _(Effect.tryPromise(() => fs.writeFile(sourcePath, nextSourceLines.join("\n"))));
+
+    if (sourceInfo.kind !== "entry") {
+      yield* _(ensureFileExists(dailyPath, formatDate(new Date())));
+      const dailyContent = yield* _(readFile(dailyPath));
+      const updatedDaily = appendWithSpacing(dailyContent, linkLine);
+      yield* _(Effect.tryPromise(() => fs.writeFile(dailyPath, updatedDaily)));
+    }
+
+    yield* _(ensureFileExists(targetPath, targetSlug));
+    const targetContent = yield* _(readFile(targetPath));
+    const updatedTarget = appendWithSpacing(targetContent, extractedText);
+    yield* _(Effect.tryPromise(() => fs.writeFile(targetPath, updatedTarget)));
   });

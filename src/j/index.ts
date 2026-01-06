@@ -5,6 +5,7 @@ import {
   journalDir,
   noteBrowse,
   openEntry,
+  extractToNote,
   openMostRecent,
   searchByContent,
   searchByDate,
@@ -41,7 +42,9 @@ Tag conventions supported (line 2 only):
 Notes:
   -n, --note [SLUG]  Open note (if SLUG omitted, pick from list)
   -n=SLUG, --note=SLUG
-  -c, --continue     Open most recently modified entry (daily or note)
+  -c, --continue     Open most recently opened entry (daily or note)
+  -x, --extract SRC START END SLUG
+                     Move lines from SRC to SLUG, add link in daily note
 `;
 
 type Mode =
@@ -52,13 +55,18 @@ type Mode =
   | "timeline"
   | "tag"
   | "note"
-  | "continue";
+  | "continue"
+  | "extract";
 
 type ParsedArgs = {
   mode: Mode;
   tag?: string;
   daysAgo?: number;
   noteSlug?: string;
+  extractSource?: string;
+  extractStart?: number;
+  extractEnd?: number;
+  extractSlug?: string;
 };
 
 const formatDate = (date: Date) => {
@@ -78,6 +86,10 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
     let tag: string | undefined;
     let daysAgo: number | undefined;
     let noteSlug: string | undefined;
+    let extractSource: string | undefined;
+    let extractStart: number | undefined;
+    let extractEnd: number | undefined;
+    let extractSlug: string | undefined;
 
     let index = 0;
     while (index < args.length) {
@@ -133,6 +145,38 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
           mode = "continue";
           index += 1;
           break;
+        case "-x":
+        case "--extract": {
+          const source = args[index + 1];
+          const startRaw = args[index + 2];
+          const endRaw = args[index + 3];
+          const slug = args[index + 4];
+          if (!source || !startRaw || !endRaw || !slug) {
+            yield* _(Effect.sync(() =>
+              console.error(
+                "Error: --extract requires source, start line, end line, and slug."
+              )
+            ));
+            yield* _(Effect.sync(() => console.log(usageText)));
+            return yield* _(Effect.fail(new Error("Missing --extract arguments")));
+          }
+          const startLine = Number(startRaw);
+          const endLine = Number(endRaw);
+          if (Number.isNaN(startLine) || Number.isNaN(endLine)) {
+            yield* _(Effect.sync(() =>
+              console.error("Error: --extract start/end must be numbers.")
+            ));
+            yield* _(Effect.sync(() => console.log(usageText)));
+            return yield* _(Effect.fail(new Error("Invalid --extract arguments")));
+          }
+          mode = "extract";
+          extractSource = source;
+          extractStart = startLine;
+          extractEnd = endLine;
+          extractSlug = slug;
+          index += 5;
+          break;
+        }
         default: {
           if (arg.startsWith("--tag=")) {
             tag = arg.slice("--tag=".length);
@@ -172,7 +216,16 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
       }
     }
 
-    return { mode, tag, daysAgo, noteSlug } satisfies ParsedArgs;
+    return {
+      mode,
+      tag,
+      daysAgo,
+      noteSlug,
+      extractSource,
+      extractStart,
+      extractEnd,
+      extractSlug,
+    } satisfies ParsedArgs;
   });
 
 const main = Effect.gen(function* (_) {
@@ -211,6 +264,24 @@ const main = Effect.gen(function* (_) {
       break;
     case "continue":
       yield* _(openMostRecent());
+      break;
+    case "extract":
+      if (
+        !parsed.extractSource ||
+        parsed.extractStart === undefined ||
+        parsed.extractEnd === undefined ||
+        !parsed.extractSlug
+      ) {
+        return;
+      }
+      yield* _(
+        extractToNote({
+          source: parsed.extractSource,
+          startLine: parsed.extractStart,
+          endLine: parsed.extractEnd,
+          slug: parsed.extractSlug,
+        })
+      );
       break;
     default:
       yield* _(Effect.fail(new Error(`Unknown mode: ${parsed.mode}`)));
