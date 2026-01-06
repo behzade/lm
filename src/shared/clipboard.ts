@@ -6,43 +6,49 @@ export type ClipboardCommand = {
   args: string[];
 };
 
-const getWriteCommand = () => {
+const getWriteCommand = Effect.gen(function* () {
   switch (process.platform) {
     case "darwin":
       return { cmd: "pbcopy", args: [] } satisfies ClipboardCommand;
     case "linux":
-      if (Bun.which("wl-copy")) {
+      if (yield* commandExists("wl-copy")) {
         return { cmd: "wl-copy", args: [] } satisfies ClipboardCommand;
       }
-      if (Bun.which("xclip")) {
-        return { cmd: "xclip", args: ["-selection", "clipboard"] } satisfies ClipboardCommand;
+      if (yield* commandExists("xclip")) {
+        return {
+          cmd: "xclip",
+          args: ["-selection", "clipboard"],
+        } satisfies ClipboardCommand;
       }
       return null;
     default:
       return null;
   }
-};
+});
 
-const getReadCommand = () => {
+const getReadCommand = Effect.gen(function* () {
   switch (process.platform) {
     case "darwin":
       return { cmd: "pbpaste", args: [] } satisfies ClipboardCommand;
     case "linux":
-      if (Bun.which("wl-paste")) {
+      if (yield* commandExists("wl-paste")) {
         return { cmd: "wl-paste", args: [] } satisfies ClipboardCommand;
       }
-      if (Bun.which("xclip")) {
-        return { cmd: "xclip", args: ["-selection", "clipboard", "-o"] } satisfies ClipboardCommand;
+      if (yield* commandExists("xclip")) {
+        return {
+          cmd: "xclip",
+          args: ["-selection", "clipboard", "-o"],
+        } satisfies ClipboardCommand;
       }
       return null;
     default:
       return null;
   }
-};
+});
 
 export const writeClipboard = (text: string) =>
   Effect.gen(function* () {
-    const command = getWriteCommand();
+    const command = yield* getWriteCommand;
     if (!command) {
       return yield* Effect.fail(new Error("Clipboard utility not found."));
     }
@@ -57,7 +63,7 @@ export const writeClipboard = (text: string) =>
 
 export const readClipboard = () =>
   Effect.gen(function* () {
-    const command = getReadCommand();
+    const command = yield* getReadCommand;
     if (!command) {
       return yield* Effect.fail(new Error("Clipboard utility not found."));
     }

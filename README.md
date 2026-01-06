@@ -1,15 +1,35 @@
 # lm tools
 
-Small collection of personal CLI tools, rewritten in TypeScript + Effect and run with Bun.
+Small collection of personal CLI tools, rewritten in TypeScript + Effect and run with Bun or Node.
 
 ## Requirements
-- Bun (runtime for the TypeScript CLIs)
+- Bun or Node (>= 18) for the TypeScript CLIs
 - For `j`: `nvim`, `fzf`, `rg` (optional: `bat` for nicer previews)
 
 ## Install
 ```sh
 bun install
 bun link
+```
+
+Node (uses `tsx` to run the TypeScript entrypoints):
+```sh
+npm install
+```
+
+## Run
+Bun:
+```sh
+bun run src/j/index.bun.ts
+bun run src/ctx/index.bun.ts
+bun run src/lm/index.bun.ts
+```
+
+Node:
+```sh
+node --import tsx src/j/index.node.ts
+node --import tsx src/ctx/index.node.ts
+node --import tsx src/lm/index.node.ts
 ```
 
 ## Tools

@@ -1,6 +1,4 @@
-#!/usr/bin/env bun
 import { FileSystem, Path } from "@effect/platform";
-import { BunContext } from "@effect/platform-bun";
 import { Effect } from "effect";
 import { writeClipboard } from "../shared/clipboard";
 import { minimatch } from "minimatch";
@@ -192,7 +190,7 @@ const buildOutput = (rootDir: string, files: string[], log: (message: string) =>
     return output;
   });
 
-const main = Effect.gen(function* () {
+export const main = Effect.gen(function* () {
   const args = process.argv.slice(2);
   const parsed = yield* parseArgs(args);
   if (!parsed) {
@@ -235,11 +233,4 @@ const main = Effect.gen(function* () {
   yield* writeClipboard(output);
   log("-----------------------------------------------------");
   log(`Success! Copied content of ${files.length} files to the clipboard.`);
-});
-
-Effect.runPromise(main.pipe(Effect.provide(BunContext.layer))).catch((error) => {
-  if (error instanceof Error && error.message) {
-    console.error(error.message);
-  }
-  process.exitCode = 1;
 });

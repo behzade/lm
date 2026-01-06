@@ -1,6 +1,4 @@
-#!/usr/bin/env bun
 import { FileSystem, Path } from "@effect/platform";
-import { BunContext } from "@effect/platform-bun";
 import { Effect } from "effect";
 import {
   DEFAULT_SYSTEM_PROMPT,
@@ -365,7 +363,7 @@ const getInput = (promptArg?: string) =>
     return parts.join("\n\n");
   });
 
-const main = Effect.gen(function* () {
+export const main = Effect.gen(function* () {
   const args = process.argv.slice(2);
   const parsed = yield* parseArgs(args);
   if (!parsed) {
@@ -419,11 +417,4 @@ const main = Effect.gen(function* () {
     topP: parsed.topP,
     interactive: process.stdout.isTTY,
   });
-});
-
-Effect.runPromise(main.pipe(Effect.provide(BunContext.layer))).catch((error) => {
-  if (error instanceof Error && error.message) {
-    console.error(error.message);
-  }
-  process.exitCode = 1;
 });

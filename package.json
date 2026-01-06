@@ -3,19 +3,29 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "mkdir -p ~/.local/bin && bun build src/j/index.ts --compile --outfile ~/.local/bin/j && bun build src/ctx/index.ts --compile --outfile ~/.local/bin/ctx && bun build src/lm/index.ts --compile --outfile ~/.local/bin/lm"
+    "build": "mkdir -p ~/.local/bin && bun build src/j/index.bun.ts --compile --outfile ~/.local/bin/j && bun build src/ctx/index.bun.ts --compile --outfile ~/.local/bin/ctx && bun build src/lm/index.bun.ts --compile --outfile ~/.local/bin/lm",
+    "dev:j:bun": "bun run src/j/index.bun.ts",
+    "dev:j:node": "node --import tsx src/j/index.node.ts",
+    "dev:ctx:bun": "bun run src/ctx/index.bun.ts",
+    "dev:ctx:node": "node --import tsx src/ctx/index.node.ts",
+    "dev:lm:bun": "bun run src/lm/index.bun.ts",
+    "dev:lm:node": "node --import tsx src/lm/index.node.ts"
   },
   "bin": {
-    "j": "src/j/index.ts",
-    "ctx": "src/ctx/index.ts",
-    "lm": "src/lm/index.ts"
+    "j": "src/j/index.bun.ts",
+    "ctx": "src/ctx/index.bun.ts",
+    "lm": "src/lm/index.bun.ts"
   },
   "dependencies": {
     "@effect/platform": "^0.94.1",
     "@effect/platform-bun": "^0.87.0",
+    "@effect/platform-node": "^0.104.0",
     "duck-duck-scrape": "^2.2.5",
     "effect": "^3.10.7",
     "minimatch": "^9.0.5",
     "openai": "^4.77.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.4"
   }
 }

@@ -1,4 +1,7 @@
+import { Command } from "@effect/platform";
+import * as Chunk from "effect/Chunk";
 import { Effect } from "effect";
+import * as Stream from "effect/Stream";
 
 export type CommandResult = {
   stdout: string;
@@ -12,54 +15,74 @@ export type CommandInput = {
   env?: Record<string, string | undefined>;
 };
 
+const collectOutput = (stream: Stream.Stream<Uint8Array, unknown, unknown>) =>
+  Effect.map(Stream.runCollect(Stream.decodeText(stream)), (chunks) =>
+    Chunk.join(chunks, "")
+  );
+
+const buildCommand = (
+  cmd: string,
+  args: string[],
+  input: CommandInput
+) => {
+  let command = Command.make(cmd, ...args);
+
+  if (input.cwd) {
+    command = Command.workingDirectory(command, input.cwd);
+  }
+  if (input.env && Object.keys(input.env).length > 0) {
+    command = Command.env(command, input.env);
+  }
+  if (input.stdin !== undefined) {
+    command = Command.feed(command, input.stdin);
+  }
+
+  return command;
+};
+
 export const commandExists = (name: string) =>
-  Effect.sync(() => Boolean(Bun.which(name)));
+  Command.exitCode(Command.make("which", name)).pipe(
+    Effect.map((exitCode) => Number(exitCode) === 0),
+    Effect.catchAll(() => Effect.succeed(false))
+  );
 
 export const runCommand = (
   cmd: string,
   args: string[] = [],
   input: CommandInput = {}
 ) =>
-  Effect.tryPromise(async () => {
-    const proc = Bun.spawn([cmd, ...args], {
-      cwd: input.cwd,
-      env: {
-        ...process.env,
-        ...input.env,
-      },
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+  Effect.scoped(
+    Effect.gen(function* () {
+      const command = buildCommand(cmd, args, input);
+      const process = yield* Command.start(command);
+      const [stdout, stderr, exitCode] = yield* Effect.all(
+        [
+          collectOutput(process.stdout),
+          collectOutput(process.stderr),
+          process.exitCode,
+        ],
+        { concurrency: "unbounded" }
+      );
 
-    if (input.stdin !== undefined) {
-      proc.stdin.write(input.stdin);
-      proc.stdin.end();
-    }
-
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-    const exitCode = await proc.exited;
-
-    return { stdout, stderr, exitCode } satisfies CommandResult;
-  });
+      return {
+        stdout,
+        stderr,
+        exitCode: Number(exitCode),
+      } satisfies CommandResult;
+    })
+  );
 
 export const runCommandInherit = (
   cmd: string,
   args: string[] = [],
   input: CommandInput = {}
 ) =>
-  Effect.tryPromise(async () => {
-    const proc = Bun.spawn([cmd, ...args], {
-      cwd: input.cwd,
-      env: {
-        ...process.env,
-        ...input.env,
-      },
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-    });
+  Effect.gen(function* () {
+    let command = buildCommand(cmd, args, input);
+    command = Command.stdin(command, "inherit");
+    command = Command.stdout(command, "inherit");
+    command = Command.stderr(command, "inherit");
+    const exitCode = yield* Command.exitCode(command);
 
-    return await proc.exited;
+    return Number(exitCode);
   });

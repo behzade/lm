@@ -1,6 +1,4 @@
-#!/usr/bin/env bun
 import { FileSystem } from "@effect/platform";
-import { BunContext } from "@effect/platform-bun";
 import { Effect } from "effect";
 import {
   dateDaysAgo,
@@ -320,7 +318,7 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
     } satisfies ParsedArgs;
   });
 
-const main = Effect.gen(function* () {
+export const main = Effect.gen(function* () {
   const args = process.argv.slice(2);
   const parsed = yield* parseArgs(args);
   if (!parsed) {
@@ -506,11 +504,4 @@ const main = Effect.gen(function* () {
     default:
       yield* Effect.fail(new Error(`Unknown mode: ${parsed.mode}`));
   }
-});
-
-Effect.runPromise(main.pipe(Effect.provide(BunContext.layer))).catch((error) => {
-  if (error instanceof Error && error.message) {
-    console.error(error.message);
-  }
-  process.exitCode = 1;
 });
