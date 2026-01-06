@@ -697,6 +697,231 @@ const appendWithSpacing = (existing: string, addition: string) => {
   return `${existing}${separator}${addition}${addition.endsWith("\n") ? "" : "\n"}`;
 };
 
+const isBlankLine = (line: string) => line.trim() === "";
+
+const isSeparatorLine = (line: string) => {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
+  }
+  const collapsed = trimmed.replace(/\s+/g, "");
+  if (collapsed.length < 3) {
+    return false;
+  }
+  const char = collapsed[0];
+  if (!["-", "*", "_"].includes(char)) {
+    return false;
+  }
+  for (const value of collapsed) {
+    if (value !== char) {
+      return false;
+    }
+  }
+  return true;
+};
+
+type Section = {
+  index: number;
+  startLine: number;
+  endLine: number;
+  blockEndLine: number;
+  title: string;
+  preview: string;
+};
+
+const collectSections = (content: string): Section[] => {
+  const lines = content.split(/\r?\n/);
+  const sections: Omit<Section, "index">[] = [];
+  let startLine: number | null = null;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    const lineNumber = i + 1;
+    if (isSeparatorLine(line)) {
+      if (startLine !== null) {
+        let endLine = lineNumber - 1;
+        while (endLine >= startLine && isBlankLine(lines[endLine - 1] ?? "")) {
+          endLine -= 1;
+        }
+        if (endLine >= startLine) {
+          sections.push({ startLine, endLine, title: "", preview: "" });
+        }
+        startLine = null;
+      }
+      continue;
+    }
+
+    if (startLine === null && !isBlankLine(line)) {
+      startLine = lineNumber;
+    }
+  }
+
+  if (startLine !== null) {
+    let endLine = lines.length;
+    while (endLine >= startLine && isBlankLine(lines[endLine - 1] ?? "")) {
+      endLine -= 1;
+    }
+    if (endLine >= startLine) {
+      sections.push({ startLine, endLine, title: "", preview: "" });
+    }
+  }
+
+  return sections.map((section, idx) => {
+    let title = "(empty section)";
+    for (let lineIndex = section.startLine; lineIndex <= section.endLine; lineIndex += 1) {
+      const text = (lines[lineIndex - 1] ?? "").trim();
+      if (text) {
+        title = text;
+        break;
+      }
+    }
+    let blockEndLine = section.endLine;
+    let scanLine = section.endLine + 1;
+    while (scanLine <= lines.length && isBlankLine(lines[scanLine - 1] ?? "")) {
+      scanLine += 1;
+    }
+    if (scanLine <= lines.length && isSeparatorLine(lines[scanLine - 1] ?? "")) {
+      blockEndLine = scanLine;
+    }
+    const preview = lines.slice(section.startLine - 1, blockEndLine).join("\n");
+    return {
+      index: idx + 1,
+      startLine: section.startLine,
+      endLine: section.endLine,
+      blockEndLine,
+      title,
+      preview,
+    } satisfies Section;
+  });
+};
+
+const parseSectionList = (input: string) =>
+  input
+    .split(/[,\s]+/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+const resolveSourcePath = (paths: JournalPaths, source: string) => {
+  const sourceInfo = resolveSource(paths, source);
+  if (sourceInfo.kind === "unknown") {
+    return null;
+  }
+  const sourcePath =
+    sourceInfo.kind === "entry"
+      ? entryPathForDate(paths, sourceInfo.id)
+      : notePathForSlug(paths, sourceInfo.id);
+  return { sourcePath, sourceInfo };
+};
+
+export const listSections = (source: string) =>
+  Effect.gen(function* () {
+    const paths = yield* getJournalPaths;
+    const resolved = resolveSourcePath(paths, source);
+    if (!resolved) {
+      return yield* Effect.fail(new Error("Missing source note."));
+    }
+    const content = yield* readFile(resolved.sourcePath).pipe(
+      Effect.catchAll((error) =>
+        isNotFoundError(error)
+          ? Effect.fail(new Error(`Source note not found: ${resolved.sourcePath}`))
+          : Effect.fail(error)
+      )
+    );
+    return collectSections(content);
+  });
+
+export const extractSectionsToNote = (options: {
+  source: string;
+  sections: number[] | string;
+  slug: string;
+}) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const paths = yield* getJournalPaths;
+    const resolved = resolveSourcePath(paths, options.source);
+    if (!resolved) {
+      return yield* Effect.fail(new Error("Missing source note."));
+    }
+
+    const targetSlug = normalizeNoteSlug(paths, options.slug);
+    if (!targetSlug) {
+      return yield* Effect.fail(new Error("Missing target note slug."));
+    }
+
+    const sourceContent = yield* readFile(resolved.sourcePath).pipe(
+      Effect.catchAll((error) =>
+        isNotFoundError(error)
+          ? Effect.fail(new Error(`Source note not found: ${resolved.sourcePath}`))
+          : Effect.fail(error)
+      )
+    );
+
+    const sections = collectSections(sourceContent);
+    const requested =
+      typeof options.sections === "string"
+        ? parseSectionList(options.sections)
+        : options.sections;
+    const unique = Array.from(new Set(requested)).sort((a, b) => a - b);
+    if (unique.length === 0) {
+      return yield* Effect.fail(new Error("No sections selected."));
+    }
+
+    const selectedSections = unique.map((index) => sections[index - 1]).filter(Boolean);
+    if (selectedSections.length === 0) {
+      return yield* Effect.fail(new Error("No matching sections found."));
+    }
+
+    const lines = sourceContent.split(/\r?\n/);
+    const extractedChunks: string[] = [];
+    const linkTarget = `notes/${targetSlug}.md`;
+    const sourceLabel =
+      resolved.sourceInfo.kind === "entry"
+        ? resolved.sourceInfo.id
+        : paths.path.basename(resolved.sourcePath, ".md");
+    const sourceLinkTarget = paths.path
+      .relative(paths.notesDir, resolved.sourcePath)
+      .replace(/\\/g, "/");
+    const sourceLinkLine = sourceLinkTarget
+      ? `Source: [${sourceLabel}](${sourceLinkTarget})`
+      : "";
+
+    const replacements = selectedSections
+      .map((section) => {
+        const startLine = section.startLine;
+        const endLine = section.blockEndLine ?? section.endLine;
+        const block = lines.slice(startLine - 1, endLine).join("\n");
+        extractedChunks.push(block);
+        const indent = (lines[startLine - 1] ?? "").match(/^\s*/)?.[0] ?? "";
+        const linkLine = `${indent}[${targetSlug}](${linkTarget})`;
+        return { startLine, endLine, linkLine };
+      })
+      .sort((a, b) => b.startLine - a.startLine);
+
+    for (const replacement of replacements) {
+      lines.splice(
+        replacement.startLine - 1,
+        replacement.endLine - replacement.startLine + 1,
+        replacement.linkLine
+      );
+    }
+
+    yield* fs.writeFileString(resolved.sourcePath, lines.join("\n"));
+
+    const extractedText = extractedChunks.filter((chunk) => chunk.trim()).join("\n\n");
+    if (extractedText.trim()) {
+      const mergedText = sourceLinkLine
+        ? `${sourceLinkLine}\n\n${extractedText}`
+        : extractedText;
+      const targetPath = notePathForSlug(paths, targetSlug);
+      yield* ensureFileExists(targetPath, targetSlug);
+      const targetContent = yield* readFile(targetPath);
+      const updatedTarget = appendWithSpacing(targetContent, mergedText);
+      yield* fs.writeFileString(targetPath, updatedTarget);
+    }
+  });
+
 export const extractToNote = (options: {
   source: string;
   startLine: number;
@@ -706,8 +931,8 @@ export const extractToNote = (options: {
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const paths = yield* getJournalPaths;
-    const sourceInfo = resolveSource(paths, options.source);
-    if (sourceInfo.kind === "unknown") {
+    const resolved = resolveSourcePath(paths, options.source);
+    if (!resolved) {
       return yield* Effect.fail(new Error("Missing source note."));
     }
 
@@ -716,10 +941,7 @@ export const extractToNote = (options: {
       return yield* Effect.fail(new Error("Missing target note slug."));
     }
 
-    const sourcePath =
-      sourceInfo.kind === "entry"
-        ? entryPathForDate(paths, sourceInfo.id)
-        : notePathForSlug(paths, sourceInfo.id);
+    const sourcePath = resolved.sourcePath;
     const targetPath = notePathForSlug(paths, targetSlug);
 
     const sourceContentResult = yield* readFile(sourcePath).pipe(
@@ -744,12 +966,28 @@ export const extractToNote = (options: {
 
     const extractedLines = lines.slice(start - 1, end);
     const extractedText = extractedLines.join("\n");
+    const indent = extractedLines[0]?.match(/^\s*/)?.[0] ?? "";
+    const linkLine = `${indent}[${targetSlug}](notes/${targetSlug}.md)`;
+    lines.splice(start - 1, end - start + 1, linkLine);
+    yield* fs.writeFileString(sourcePath, lines.join("\n"));
 
-    const nextSourceLines = lines.slice(0, start - 1).concat(lines.slice(end));
-    yield* fs.writeFileString(sourcePath, nextSourceLines.join("\n"));
-
-    yield* ensureFileExists(targetPath, targetSlug);
-    const targetContent = yield* readFile(targetPath);
-    const updatedTarget = appendWithSpacing(targetContent, extractedText);
-    yield* fs.writeFileString(targetPath, updatedTarget);
+    if (extractedText.trim()) {
+      const sourceLabel =
+        resolved.sourceInfo.kind === "entry"
+          ? resolved.sourceInfo.id
+          : paths.path.basename(sourcePath, ".md");
+      const sourceLinkTarget = paths.path
+        .relative(paths.notesDir, sourcePath)
+        .replace(/\\/g, "/");
+      const sourceLinkLine = sourceLinkTarget
+        ? `Source: [${sourceLabel}](${sourceLinkTarget})`
+        : "";
+      const mergedText = sourceLinkLine
+        ? `${sourceLinkLine}\n\n${extractedText}`
+        : extractedText;
+      yield* ensureFileExists(targetPath, targetSlug);
+      const targetContent = yield* readFile(targetPath);
+      const updatedTarget = appendWithSpacing(targetContent, mergedText);
+      yield* fs.writeFileString(targetPath, updatedTarget);
+    }
   });
