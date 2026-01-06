@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
+import { FileSystem } from "@effect/platform";
+import { BunContext } from "@effect/platform-bun";
 import { Effect } from "effect";
 import {
   dateDaysAgo,
-  journalDir,
+  getJournalPaths,
   noteBrowse,
   openEntry,
   extractToNote,
@@ -12,7 +14,6 @@ import {
   tagBrowse,
   timelineView,
 } from "./actions";
-import * as fs from "node:fs/promises";
 
 const usageText = `Usage: j [options] | j -N
 
@@ -77,7 +78,7 @@ const formatDate = (date: Date) => {
 };
 
 const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
     if (args.length === 1 && /^-\d+$/.test(args[0])) {
       return { mode: "offset", daysAgo: Number(args[0].slice(1)) } satisfies ParsedArgs;
     }
@@ -98,7 +99,7 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
       switch (arg) {
         case "-h":
         case "--help":
-          yield* _(Effect.sync(() => console.log(usageText)));
+          yield* Effect.sync(() => console.log(usageText));
           return null;
         case "-d":
         case "--date":
@@ -152,22 +153,22 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
           const endRaw = args[index + 3];
           const slug = args[index + 4];
           if (!source || !startRaw || !endRaw || !slug) {
-            yield* _(Effect.sync(() =>
+            yield* Effect.sync(() =>
               console.error(
                 "Error: --extract requires source, start line, end line, and slug."
               )
-            ));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Missing --extract arguments")));
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Missing --extract arguments"));
           }
           const startLine = Number(startRaw);
           const endLine = Number(endRaw);
           if (Number.isNaN(startLine) || Number.isNaN(endLine)) {
-            yield* _(Effect.sync(() =>
+            yield* Effect.sync(() =>
               console.error("Error: --extract start/end must be numbers.")
-            ));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Invalid --extract arguments")));
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Invalid --extract arguments"));
           }
           mode = "extract";
           extractSource = source;
@@ -209,9 +210,9 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
             break;
           }
 
-          yield* _(Effect.sync(() => console.error(`Unknown option: ${arg}`)));
-          yield* _(Effect.sync(() => console.log(usageText)));
-          return yield* _(Effect.fail(new Error("Unknown option")));
+          yield* Effect.sync(() => console.error(`Unknown option: ${arg}`));
+          yield* Effect.sync(() => console.log(usageText));
+          return yield* Effect.fail(new Error("Unknown option"));
         }
       }
     }
@@ -228,42 +229,44 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
     } satisfies ParsedArgs;
   });
 
-const main = Effect.gen(function* (_) {
+const main = Effect.gen(function* () {
   const args = process.argv.slice(2);
-  const parsed = yield* _(parseArgs(args));
+  const parsed = yield* parseArgs(args);
   if (!parsed) {
     return;
   }
 
-  yield* _(Effect.tryPromise(() => fs.mkdir(journalDir, { recursive: true })));
+  const fs = yield* FileSystem.FileSystem;
+  const { journalDir } = yield* getJournalPaths;
+  yield* fs.makeDirectory(journalDir, { recursive: true });
 
   switch (parsed.mode) {
     case "today":
-      yield* _(openEntry(formatDate(new Date())));
+      yield* openEntry(formatDate(new Date()));
       break;
     case "offset":
       if (parsed.daysAgo === undefined) {
         return;
       }
-      yield* _(openEntry(dateDaysAgo(parsed.daysAgo)));
+      yield* openEntry(dateDaysAgo(parsed.daysAgo));
       break;
     case "date":
-      yield* _(searchByDate(parsed.tag));
+      yield* searchByDate(parsed.tag);
       break;
     case "search":
-      yield* _(searchByContent());
+      yield* searchByContent();
       break;
     case "timeline":
-      yield* _(timelineView(parsed.tag));
+      yield* timelineView(parsed.tag);
       break;
     case "tag":
-      yield* _(tagBrowse(parsed.tag));
+      yield* tagBrowse(parsed.tag);
       break;
     case "note":
-      yield* _(noteBrowse(parsed.noteSlug));
+      yield* noteBrowse(parsed.noteSlug);
       break;
     case "continue":
-      yield* _(openMostRecent());
+      yield* openMostRecent();
       break;
     case "extract":
       if (
@@ -274,21 +277,19 @@ const main = Effect.gen(function* (_) {
       ) {
         return;
       }
-      yield* _(
-        extractToNote({
-          source: parsed.extractSource,
-          startLine: parsed.extractStart,
-          endLine: parsed.extractEnd,
-          slug: parsed.extractSlug,
-        })
-      );
+      yield* extractToNote({
+        source: parsed.extractSource,
+        startLine: parsed.extractStart,
+        endLine: parsed.extractEnd,
+        slug: parsed.extractSlug,
+      });
       break;
     default:
-      yield* _(Effect.fail(new Error(`Unknown mode: ${parsed.mode}`)));
+      yield* Effect.fail(new Error(`Unknown mode: ${parsed.mode}`));
   }
 });
 
-Effect.runPromise(main).catch((error) => {
+Effect.runPromise(main.pipe(Effect.provide(BunContext.layer))).catch((error) => {
   if (error instanceof Error && error.message) {
     console.error(error.message);
   }

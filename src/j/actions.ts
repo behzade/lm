@@ -1,17 +1,88 @@
+import { FileSystem, Path } from "@effect/platform";
 import { Effect } from "effect";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import * as os from "node:os";
 import { runCommand, runCommandInherit } from "../shared/command";
 
-const homeDir = os.homedir();
-export const journalDir = path.join(homeDir, "journal");
-export const notesDir = path.join(journalDir, "notes");
-const stateDir =
-  process.env.XDG_CONFIG_HOME
+type PathOps = {
+  join: (...segments: string[]) => string;
+  dirname: (path: string) => string;
+  basename: (path: string, ext?: string) => string;
+  relative: (from: string, to: string) => string;
+  isAbsolute: (path: string) => boolean;
+  sep: string;
+};
+
+type JournalPaths = {
+  path: PathOps;
+  journalDir: string;
+  notesDir: string;
+  stateDir: string;
+  stateFile: string;
+};
+
+const getHomeDir = Effect.sync(() => {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? ".";
+  return home || ".";
+});
+
+export const getJournalPaths = Effect.gen(function* () {
+  const path = yield* Path.Path;
+  const homeDir = yield* getHomeDir;
+  const journalDir = path.join(homeDir, "journal");
+  const notesDir = path.join(journalDir, "notes");
+  const stateDir = process.env.XDG_CONFIG_HOME
     ? path.join(process.env.XDG_CONFIG_HOME, "lm")
     : path.join(homeDir, ".config", "lm");
-const stateFile = path.join(stateDir, "j-state.json");
+  const stateFile = path.join(stateDir, "j-state.json");
+  return { path, journalDir, notesDir, stateDir, stateFile } satisfies JournalPaths;
+});
+
+const isNotFoundError = (error: unknown) => {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const reason = (error as { reason?: string }).reason;
+  const code = (error as { code?: string }).code;
+  return reason === "NotFound" || code === "ENOENT";
+};
+
+const isDirectoryInfo = (info: unknown) =>
+  Boolean(
+    (info as { type?: string })?.type?.toLowerCase?.() === "directory" ||
+      (info as { isDirectory?: () => boolean })?.isDirectory?.()
+  );
+
+const isFileInfo = (info: unknown) =>
+  Boolean(
+    (info as { type?: string })?.type?.toLowerCase?.() === "file" ||
+      (info as { isFile?: () => boolean })?.isFile?.()
+  );
+
+const getModifiedTimeMs = (info: unknown) => {
+  if (!info || typeof info !== "object") {
+    return 0;
+  }
+  const candidate = info as {
+    mtimeMs?: number;
+    mtime?: number | Date;
+    modified?: number | Date;
+    modificationTime?: number | Date;
+    modifiedAt?: number | Date;
+  };
+  const value =
+    candidate.mtimeMs ??
+    candidate.mtime ??
+    candidate.modified ??
+    candidate.modificationTime ??
+    candidate.modifiedAt ??
+    0;
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+  if (typeof value === "number") {
+    return value;
+  }
+  return 0;
+};
 
 const normalizeTag = (value: string) =>
   value.replace(/[^A-Za-z0-9_-]/g, "").toLowerCase();
@@ -26,35 +97,44 @@ const formatDate = (date: Date) => {
 export const dateDaysAgo = (days: number) =>
   formatDate(new Date(Date.now() - days * 24 * 60 * 60 * 1000));
 
-export const entryPathForDate = (date: string) =>
-  path.join(journalDir, `${date}.md`);
+const entryPathForDate = (paths: JournalPaths, date: string) =>
+  paths.path.join(paths.journalDir, `${date}.md`);
 
-export const notePathForSlug = (slug: string) =>
-  path.join(notesDir, `${slug}.md`);
+const notePathForSlug = (paths: JournalPaths, slug: string) =>
+  paths.path.join(paths.notesDir, `${slug}.md`);
 
 const ensureFileExists = (filePath: string, title: string) =>
-  Effect.tryPromise(async () => {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-
-    try {
-      await fs.access(filePath);
-      return;
-    } catch {
-      await fs.writeFile(filePath, `# ${title}\ntags:\n\n`, {
-        flag: "wx",
-      });
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    yield* fs.makeDirectory(path.dirname(filePath), { recursive: true });
+    const exists = yield* fs.stat(filePath).pipe(
+      Effect.as(true),
+      Effect.catchAll(() => Effect.succeed(false))
+    );
+    if (!exists) {
+      yield* fs.writeFileString(filePath, `# ${title}\ntags:\n\n`);
     }
   });
 
 const readFile = (filePath: string) =>
-  Effect.tryPromise(() => fs.readFile(filePath, "utf8"));
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    return yield* fs.readFileString(filePath);
+  });
 
-const statFile = (filePath: string) => Effect.tryPromise(() => fs.stat(filePath));
+const statFile = (filePath: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    return yield* fs.stat(filePath);
+  });
 
 const recordLastOpened = (filePath: string) =>
-  Effect.tryPromise(async () => {
-    await fs.mkdir(stateDir, { recursive: true });
-    await fs.writeFile(
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const { stateDir, stateFile } = yield* getJournalPaths;
+    yield* fs.makeDirectory(stateDir, { recursive: true });
+    yield* fs.writeFileString(
       stateFile,
       JSON.stringify(
         {
@@ -68,55 +148,59 @@ const recordLastOpened = (filePath: string) =>
   });
 
 const readLastOpened = () =>
-  Effect.tryPromise(async () => {
-    try {
-      const content = await fs.readFile(stateFile, "utf8");
-      let parsed: { lastOpenedPath?: string } | null = null;
-      try {
-        parsed = JSON.parse(content) as { lastOpenedPath?: string };
-      } catch {
-        return "";
-      }
-      const candidate = parsed?.lastOpenedPath;
-      if (!candidate) {
-        return "";
-      }
-      const exists = await fs
-        .stat(candidate)
-        .then(() => true)
-        .catch(() => false);
-      return exists ? candidate : "";
-    } catch (error: any) {
-      if (error?.code === "ENOENT") {
-        return "";
-      }
-      throw error;
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const { stateFile } = yield* getJournalPaths;
+    const content = yield* fs.readFileString(stateFile).pipe(
+      Effect.catchAll((error) =>
+        isNotFoundError(error) ? Effect.succeed("") : Effect.fail(error)
+      )
+    );
+    if (!content) {
+      return "";
     }
+    let parsed: { lastOpenedPath?: string } | null = null;
+    try {
+      parsed = JSON.parse(content) as { lastOpenedPath?: string };
+    } catch {
+      return "";
+    }
+    const candidate = parsed?.lastOpenedPath;
+    if (!candidate) {
+      return "";
+    }
+    const exists = yield* fs.stat(candidate).pipe(
+      Effect.as(true),
+      Effect.catchAll(() => Effect.succeed(false))
+    );
+    return exists ? candidate : "";
   });
 
 const openInEditor = (filePath: string, line?: string | number) =>
-  Effect.gen(function* (_) {
-    yield* _(recordLastOpened(filePath));
+  Effect.gen(function* () {
+    yield* recordLastOpened(filePath);
     const args = ["--cmd", "let g:journal_mode=1"];
     if (line !== undefined) {
       args.push(`+${line}`);
     }
     args.push("+ZenMode", filePath);
-    yield* _(runCommandInherit("nvim", args));
+    yield* runCommandInherit("nvim", args);
   });
 
 export const openEntry = (date: string) =>
-  Effect.gen(function* (_) {
-    const filePath = entryPathForDate(date);
-    yield* _(ensureFileExists(filePath, date));
-    yield* _(openInEditor(filePath));
+  Effect.gen(function* () {
+    const paths = yield* getJournalPaths;
+    const filePath = entryPathForDate(paths, date);
+    yield* ensureFileExists(filePath, date);
+    yield* openInEditor(filePath);
   });
 
 export const openNote = (slug: string) =>
-  Effect.gen(function* (_) {
-    const filePath = notePathForSlug(slug);
-    yield* _(ensureFileExists(filePath, slug));
-    yield* _(openInEditor(filePath));
+  Effect.gen(function* () {
+    const paths = yield* getJournalPaths;
+    const filePath = notePathForSlug(paths, slug);
+    yield* ensureFileExists(filePath, slug);
+    yield* openInEditor(filePath);
   });
 
 const readSecondLine = (content: string) => {
@@ -125,13 +209,13 @@ const readSecondLine = (content: string) => {
 };
 
 export const fileHasTag = (filePath: string, want: string) =>
-  Effect.tryPromise(async () => {
+  Effect.gen(function* () {
     const normalizedWant = normalizeTag(want);
     if (!normalizedWant) {
       return false;
     }
 
-    const content = await fs.readFile(filePath, "utf8");
+    const content = yield* readFile(filePath);
     const line = readSecondLine(content);
 
     const hashtags = line.match(/#[A-Za-z0-9_-]+/g) ?? [];
@@ -156,36 +240,48 @@ export const fileHasTag = (filePath: string, want: string) =>
   });
 
 const walkMarkdownFiles = (rootDir: string, excludeDir: string[]) =>
-  Effect.tryPromise(async () => {
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
     const results: string[] = [];
 
-    const walk = async (dir: string) => {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          if (excludeDir.includes(entry.name)) {
+    const walk = (dir: string): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const entries = yield* fs.readDirectory(dir);
+        for (const entry of entries) {
+          const name =
+            typeof entry === "string"
+              ? entry
+              : (entry as { name?: string }).name ?? "";
+          if (!name) {
             continue;
           }
-          await walk(fullPath);
-        } else if (entry.isFile() && entry.name.endsWith(".md")) {
-          results.push(fullPath);
+          const fullPath = path.join(dir, name);
+          const info = yield* fs.stat(fullPath);
+          if (isDirectoryInfo(info)) {
+            if (excludeDir.includes(name)) {
+              continue;
+            }
+            yield* walk(fullPath);
+          } else if (isFileInfo(info) && name.endsWith(".md")) {
+            results.push(fullPath);
+          }
         }
-      }
-    };
+      });
 
-    await walk(rootDir);
+    yield* walk(rootDir);
 
     return results;
   }).pipe(
-    Effect.catchAll((error: any) =>
-      error?.code === "ENOENT" ? Effect.succeed([]) : Effect.fail(error)
+    Effect.catchAll((error) =>
+      isNotFoundError(error) ? Effect.succeed([]) : Effect.fail(error)
     )
   );
 
 export const listEntryFiles = (tag?: string) =>
-  Effect.gen(function* (_) {
-    const entries = yield* _(walkMarkdownFiles(journalDir, ["notes"]));
+  Effect.gen(function* () {
+    const { journalDir } = yield* getJournalPaths;
+    const entries = yield* walkMarkdownFiles(journalDir, ["notes"]);
     const sorted = entries.sort().reverse();
 
     if (!tag) {
@@ -194,7 +290,7 @@ export const listEntryFiles = (tag?: string) =>
 
     const filtered: string[] = [];
     for (const filePath of sorted) {
-      const hasTag = yield* _(fileHasTag(filePath, tag));
+      const hasTag = yield* fileHasTag(filePath, tag);
       if (hasTag) {
         filtered.push(filePath);
       }
@@ -204,12 +300,12 @@ export const listEntryFiles = (tag?: string) =>
   });
 
 export const listTags = () =>
-  Effect.gen(function* (_) {
-    const files = yield* _(listEntryFiles());
+  Effect.gen(function* () {
+    const files = yield* listEntryFiles();
     const tagSet = new Set<string>();
 
     for (const filePath of files) {
-      const content = yield* _(readFile(filePath));
+      const content = yield* readFile(filePath);
       const line = readSecondLine(content);
 
       const hashtags = line.match(/#[A-Za-z0-9_-]+/g) ?? [];
@@ -237,8 +333,9 @@ export const listTags = () =>
   });
 
 export const listNoteSlugs = () =>
-  Effect.gen(function* (_) {
-    const files = yield* _(walkMarkdownFiles(notesDir, []));
+  Effect.gen(function* () {
+    const { notesDir, path } = yield* getJournalPaths;
+    const files = yield* walkMarkdownFiles(notesDir, []);
     return files
       .map((filePath) => path.basename(filePath, ".md"))
       .sort();
@@ -270,7 +367,7 @@ const fzfSelect = (lines: string[], options: {
   noMulti?: boolean;
   delimiter?: string;
 }) =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
     if (lines.length === 0) {
       return "";
     }
@@ -285,7 +382,7 @@ const fzfSelect = (lines: string[], options: {
       args.push("--preview-window", options.previewWindow);
     if (options.prompt) args.push("--prompt", options.prompt);
 
-    const result = yield* _(runCommand("fzf", args, { stdin: `${lines.join("\n")}\n` }));
+    const result = yield* runCommand("fzf", args, { stdin: `${lines.join("\n")}\n` });
     if (result.exitCode !== 0) {
       return "";
     }
@@ -294,50 +391,46 @@ const fzfSelect = (lines: string[], options: {
   });
 
 export const searchByDate = (tag?: string) =>
-  Effect.gen(function* (_) {
-    const files = yield* _(listEntryFiles(tag));
+  Effect.gen(function* () {
+    const { journalDir, path } = yield* getJournalPaths;
+    const files = yield* listEntryFiles(tag);
     const relative = files.map((filePath) => path.relative(journalDir, filePath));
-    const selection = yield* _(
-      fzfSelect(relative, {
-        preview: `cat ${journalDir}/{}`,
-        previewWindow: "right:60%:wrap",
-        prompt: `Select date${tag ? ` (tag: ${tag})` : ""}: `,
-      })
-    );
+    const selection = yield* fzfSelect(relative, {
+      preview: `cat ${journalDir}/{}`,
+      previewWindow: "right:60%:wrap",
+      prompt: `Select date${tag ? ` (tag: ${tag})` : ""}: `,
+    });
 
     if (!selection) {
       return;
     }
 
-    yield* _(openInEditor(path.join(journalDir, selection)));
+    yield* openInEditor(path.join(journalDir, selection));
   });
 
 export const searchByContent = () =>
-  Effect.gen(function* (_) {
-    const result = yield* _(
-      runCommand("rg", [
-        "--line-number",
-        "--color=always",
-        "--smart-case",
-        "",
-        journalDir,
-      ])
-    );
+  Effect.gen(function* () {
+    const { journalDir } = yield* getJournalPaths;
+    const result = yield* runCommand("rg", [
+      "--line-number",
+      "--color=always",
+      "--smart-case",
+      "",
+      journalDir,
+    ]);
 
     if (!result.stdout) {
       return;
     }
 
-    const selection = yield* _(
-      fzfSelect(result.stdout.split(/\n/).filter(Boolean), {
-        ansi: true,
-        delimiter: ":",
-        preview:
-          "bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1}",
-        previewWindow: "right:60%:wrap:+{2}-10",
-        prompt: "Search content: ",
-      })
-    );
+    const selection = yield* fzfSelect(result.stdout.split(/\n/).filter(Boolean), {
+      ansi: true,
+      delimiter: ":",
+      preview:
+        "bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1}",
+      previewWindow: "right:60%:wrap:+{2}-10",
+      prompt: "Search content: ",
+    });
 
     if (!selection) {
       return;
@@ -348,30 +441,29 @@ export const searchByContent = () =>
       return;
     }
 
-    yield* _(openInEditor(file, line));
+    yield* openInEditor(file, line);
   });
 
 export const timelineView = (tag?: string) =>
-  Effect.gen(function* (_) {
-    const files = yield* _(listEntryFiles(tag));
+  Effect.gen(function* () {
+    const { journalDir, path } = yield* getJournalPaths;
+    const files = yield* listEntryFiles(tag);
     const lines: string[] = [];
 
     for (const filePath of files) {
       const datePart = path.basename(filePath, ".md");
-      const content = yield* _(readFile(filePath));
+      const content = yield* readFile(filePath);
       const previewLine = getPreviewLine(content) || "(empty)";
       lines.push(`${datePart}  \x1b[90m${previewLine}\x1b[0m`);
     }
 
-    const selection = yield* _(
-      fzfSelect(lines, {
-        ansi: true,
-        noSort: true,
-        preview: `cat ${journalDir}/{1}.md`,
-        previewWindow: "right:65%:wrap",
-        prompt: `Timeline${tag ? ` (tag: ${tag})` : ""}: `,
-      })
-    );
+    const selection = yield* fzfSelect(lines, {
+      ansi: true,
+      noSort: true,
+      preview: `cat ${journalDir}/{1}.md`,
+      previewWindow: "right:65%:wrap",
+      prompt: `Timeline${tag ? ` (tag: ${tag})` : ""}: `,
+    });
 
     if (!selection) {
       return;
@@ -382,73 +474,71 @@ export const timelineView = (tag?: string) =>
       return;
     }
 
-    yield* _(openInEditor(path.join(journalDir, `${dateSelected}.md`)));
+    yield* openInEditor(path.join(journalDir, `${dateSelected}.md`));
   });
 
 export const tagBrowse = (tag?: string) =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
     let selectedTag = tag ?? "";
     if (!selectedTag) {
-      const tags = yield* _(listTags());
-      selectedTag = yield* _(
-        fzfSelect(tags, { prompt: "Select tag: ", noMulti: true })
-      );
+      const tags = yield* listTags();
+      selectedTag = yield* fzfSelect(tags, { prompt: "Select tag: ", noMulti: true });
     }
 
     if (!selectedTag) {
       return;
     }
 
-    yield* _(searchByDate(selectedTag));
+    yield* searchByDate(selectedTag);
   });
 
 export const noteBrowse = (slug?: string) =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
+    const { notesDir } = yield* getJournalPaths;
     let selected = slug ?? "";
     if (!selected) {
-      const notes = yield* _(listNoteSlugs());
-      selected = yield* _(
-        fzfSelect(notes, {
-          prompt: "Select note: ",
-          preview: `cat ${notesDir}/{}.md`,
-          previewWindow: "right:60%:wrap",
-          noMulti: true,
-        })
-      );
+      const notes = yield* listNoteSlugs();
+      selected = yield* fzfSelect(notes, {
+        prompt: "Select note: ",
+        preview: `cat ${notesDir}/{}.md`,
+        previewWindow: "right:60%:wrap",
+        noMulti: true,
+      });
     }
 
     if (!selected) {
       return;
     }
 
-    yield* _(openNote(selected));
+    yield* openNote(selected);
   });
 
 export const openMostRecent = () =>
-  Effect.gen(function* (_) {
-    const lastOpened = yield* _(readLastOpened());
+  Effect.gen(function* () {
+    const { journalDir } = yield* getJournalPaths;
+    const lastOpened = yield* readLastOpened();
     if (lastOpened) {
-      yield* _(openInEditor(lastOpened));
+      yield* openInEditor(lastOpened);
       return;
     }
 
-    const files = yield* _(walkMarkdownFiles(journalDir, []));
+    const files = yield* walkMarkdownFiles(journalDir, []);
     if (files.length === 0) {
-      return yield* _(Effect.fail(new Error("No entries found.")));
+      return yield* Effect.fail(new Error("No entries found."));
     }
 
     let bestFile = files[0];
     let bestMtime = 0;
     for (const filePath of files) {
-      const stats = yield* _(statFile(filePath));
-      const mtime = Math.floor(stats.mtimeMs / 1000);
+      const stats = yield* statFile(filePath);
+      const mtime = getModifiedTimeMs(stats);
       if (mtime >= bestMtime) {
         bestMtime = mtime;
         bestFile = filePath;
       }
     }
 
-    yield* _(openInEditor(bestFile));
+    yield* openInEditor(bestFile);
   });
 
 const isDateSlug = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -456,20 +546,20 @@ const isDateSlug = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
 const stripMarkdownExtension = (value: string) =>
   value.toLowerCase().endsWith(".md") ? value.slice(0, -3) : value;
 
-const normalizeNoteSlug = (value: string) => {
+const normalizeNoteSlug = (paths: JournalPaths, value: string) => {
   const trimmed = value.trim();
   if (!trimmed) {
     return "";
   }
   const withoutExt = stripMarkdownExtension(trimmed);
-  if (path.isAbsolute(withoutExt)) {
-    const relative = path.relative(notesDir, withoutExt);
+  if (paths.path.isAbsolute(withoutExt)) {
+    const relative = paths.path.relative(paths.notesDir, withoutExt);
     if (!relative.startsWith("..")) {
       return relative;
     }
   }
   if (
-    withoutExt.startsWith(`notes${path.sep}`) ||
+    withoutExt.startsWith(`notes${paths.path.sep}`) ||
     withoutExt.startsWith("notes/")
   ) {
     return withoutExt.replace(/^notes[\\/]/, "");
@@ -477,21 +567,21 @@ const normalizeNoteSlug = (value: string) => {
   return withoutExt;
 };
 
-const resolveSource = (source: string) => {
+const resolveSource = (paths: JournalPaths, source: string) => {
   const trimmed = source.trim();
   if (!trimmed) {
     return { kind: "unknown" as const, id: "" };
   }
 
   const withoutExt = stripMarkdownExtension(trimmed);
-  if (path.isAbsolute(withoutExt)) {
-    const relativeToNotes = path.relative(notesDir, withoutExt);
+  if (paths.path.isAbsolute(withoutExt)) {
+    const relativeToNotes = paths.path.relative(paths.notesDir, withoutExt);
     if (!relativeToNotes.startsWith("..")) {
       return { kind: "note" as const, id: relativeToNotes };
     }
-    const relativeToJournal = path.relative(journalDir, withoutExt);
+    const relativeToJournal = paths.path.relative(paths.journalDir, withoutExt);
     if (!relativeToJournal.startsWith("..")) {
-      const base = path.basename(withoutExt);
+      const base = paths.path.basename(withoutExt);
       if (isDateSlug(base)) {
         return { kind: "entry" as const, id: base };
       }
@@ -499,7 +589,7 @@ const resolveSource = (source: string) => {
   }
 
   if (
-    withoutExt.startsWith(`notes${path.sep}`) ||
+    withoutExt.startsWith(`notes${paths.path.sep}`) ||
     withoutExt.startsWith("notes/")
   ) {
     return { kind: "note" as const, id: withoutExt.replace(/^notes[\\/]/, "") };
@@ -528,34 +618,34 @@ export const extractToNote = (options: {
   endLine: number;
   slug: string;
 }) =>
-  Effect.gen(function* (_) {
-    const sourceInfo = resolveSource(options.source);
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const paths = yield* getJournalPaths;
+    const sourceInfo = resolveSource(paths, options.source);
     if (sourceInfo.kind === "unknown") {
-      return yield* _(Effect.fail(new Error("Missing source note.")));
+      return yield* Effect.fail(new Error("Missing source note."));
     }
 
-    const targetSlug = normalizeNoteSlug(options.slug);
+    const targetSlug = normalizeNoteSlug(paths, options.slug);
     if (!targetSlug) {
-      return yield* _(Effect.fail(new Error("Missing target note slug.")));
+      return yield* Effect.fail(new Error("Missing target note slug."));
     }
 
     const sourcePath =
       sourceInfo.kind === "entry"
-        ? entryPathForDate(sourceInfo.id)
-        : notePathForSlug(sourceInfo.id);
+        ? entryPathForDate(paths, sourceInfo.id)
+        : notePathForSlug(paths, sourceInfo.id);
     const dailyPath =
       sourceInfo.kind === "entry"
         ? sourcePath
-        : entryPathForDate(formatDate(new Date()));
-    const targetPath = notePathForSlug(targetSlug);
+        : entryPathForDate(paths, formatDate(new Date()));
+    const targetPath = notePathForSlug(paths, targetSlug);
 
-    const sourceContentResult = yield* _(
-      readFile(sourcePath).pipe(
-        Effect.catchAll((error: any) =>
-          error?.code === "ENOENT"
-            ? Effect.fail(new Error(`Source note not found: ${sourcePath}`))
-            : Effect.fail(error)
-        )
+    const sourceContentResult = yield* readFile(sourcePath).pipe(
+      Effect.catchAll((error) =>
+        isNotFoundError(error)
+          ? Effect.fail(new Error(`Source note not found: ${sourcePath}`))
+          : Effect.fail(error)
       )
     );
 
@@ -564,11 +654,9 @@ export const extractToNote = (options: {
     const end = options.endLine;
 
     if (start < 1 || end < start || end > lines.length) {
-      return yield* _(
-        Effect.fail(
-          new Error(
-            `Invalid line range ${start}-${end} for ${lines.length} lines.`
-          )
+      return yield* Effect.fail(
+        new Error(
+          `Invalid line range ${start}-${end} for ${lines.length} lines.`
         )
       );
     }
@@ -585,17 +673,17 @@ export const extractToNote = (options: {
       nextSourceLines.push(`${indent}${linkLine}`);
     }
     nextSourceLines = nextSourceLines.concat(lines.slice(end));
-    yield* _(Effect.tryPromise(() => fs.writeFile(sourcePath, nextSourceLines.join("\n"))));
+    yield* fs.writeFileString(sourcePath, nextSourceLines.join("\n"));
 
     if (sourceInfo.kind !== "entry") {
-      yield* _(ensureFileExists(dailyPath, formatDate(new Date())));
-      const dailyContent = yield* _(readFile(dailyPath));
+      yield* ensureFileExists(dailyPath, formatDate(new Date()));
+      const dailyContent = yield* readFile(dailyPath);
       const updatedDaily = appendWithSpacing(dailyContent, linkLine);
-      yield* _(Effect.tryPromise(() => fs.writeFile(dailyPath, updatedDaily)));
+      yield* fs.writeFileString(dailyPath, updatedDaily);
     }
 
-    yield* _(ensureFileExists(targetPath, targetSlug));
-    const targetContent = yield* _(readFile(targetPath));
+    yield* ensureFileExists(targetPath, targetSlug);
+    const targetContent = yield* readFile(targetPath);
     const updatedTarget = appendWithSpacing(targetContent, extractedText);
-    yield* _(Effect.tryPromise(() => fs.writeFile(targetPath, updatedTarget)));
+    yield* fs.writeFileString(targetPath, updatedTarget);
   });

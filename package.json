@@ -8,6 +8,8 @@
     "lm": "src/lm/index.ts"
   },
   "dependencies": {
+    "@effect/platform": "^0.94.1",
+    "@effect/platform-bun": "^0.87.0",
     "duck-duck-scrape": "^2.2.5",
     "effect": "^3.10.7",
     "minimatch": "^9.0.5",

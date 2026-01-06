@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
+import { FileSystem, Path } from "@effect/platform";
+import { BunContext } from "@effect/platform-bun";
 import { Effect } from "effect";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import { writeClipboard } from "../shared/clipboard";
 import { minimatch } from "minimatch";
 
@@ -34,8 +34,20 @@ type ParsedArgs = {
 const normalizeIgnoreDir = (value: string) =>
   value.replace(/\\/g, "/").replace(/\/+$/, "").replace(/^\.\//, "");
 
+const isDirectoryInfo = (info: unknown) =>
+  Boolean(
+    (info as { type?: string })?.type?.toLowerCase?.() === "directory" ||
+      (info as { isDirectory?: () => boolean })?.isDirectory?.()
+  );
+
+const isFileInfo = (info: unknown) =>
+  Boolean(
+    (info as { type?: string })?.type?.toLowerCase?.() === "file" ||
+      (info as { isFile?: () => boolean })?.isFile?.()
+  );
+
 const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
     const ignoreDirs: string[] = [];
     const ignorePatterns: string[] = [];
     const positional: string[] = [];
@@ -48,9 +60,11 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
         case "-i": {
           const next = args[index + 1];
           if (!next) {
-            yield* _(Effect.sync(() => console.error("Error: Flag '-i' requires a directory argument.")));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Missing -i argument")));
+            yield* Effect.sync(() =>
+              console.error("Error: Flag '-i' requires a directory argument.")
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Missing -i argument"));
           }
           ignoreDirs.push(normalizeIgnoreDir(next));
           index += 2;
@@ -59,9 +73,11 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
         case "-p": {
           const next = args[index + 1];
           if (!next) {
-            yield* _(Effect.sync(() => console.error("Error: Flag '-p' requires a pattern argument.")));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Missing -p argument")));
+            yield* Effect.sync(() =>
+              console.error("Error: Flag '-p' requires a pattern argument.")
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Missing -p argument"));
           }
           ignorePatterns.push(next);
           index += 2;
@@ -74,13 +90,13 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
           break;
         case "-h":
         case "--help":
-          yield* _(Effect.sync(() => console.log(usageText)));
+          yield* Effect.sync(() => console.log(usageText));
           return null;
         default:
           if (arg.startsWith("-")) {
-            yield* _(Effect.sync(() => console.error(`Error: Unknown option '${arg}'`)));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Unknown option")));
+            yield* Effect.sync(() => console.error(`Error: Unknown option '${arg}'`));
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Unknown option"));
           }
           positional.push(arg);
           index += 1;
@@ -88,9 +104,11 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
     }
 
     if (positional.length < 2) {
-      yield* _(Effect.sync(() => console.error("Error: Missing target directory or file extension.")));
-      yield* _(Effect.sync(() => console.log(usageText)));
-      return yield* _(Effect.fail(new Error("Missing arguments")));
+      yield* Effect.sync(() =>
+        console.error("Error: Missing target directory or file extension.")
+      );
+      yield* Effect.sync(() => console.log(usageText));
+      return yield* Effect.fail(new Error("Missing arguments"));
     }
 
     const targetDir = positional[0];
@@ -114,97 +132,112 @@ const collectFiles = (
   ignoreDirs: string[],
   ignorePatterns: string[]
 ) =>
-  Effect.tryPromise(async () => {
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
     const files: string[] = [];
     const normalizedExtensions = extensions.map((ext) => ext.toLowerCase());
     const ignoreDirSet = new Set(ignoreDirs.map(normalizeIgnoreDir));
 
-    const walk = async (dir: string) => {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          const relative = normalizeIgnoreDir(path.relative(rootDir, fullPath));
-          if (
-            ignoreDirSet.has(entry.name) ||
-            ignoreDirSet.has(relative) ||
-            matchesPattern(entry.name, ignorePatterns)
-          ) {
+    const walk = (dir: string): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const entries = yield* fs.readDirectory(dir);
+        for (const entry of entries) {
+          const name =
+            typeof entry === "string"
+              ? entry
+              : (entry as { name?: string }).name ?? "";
+          if (!name) {
             continue;
           }
-          await walk(fullPath);
-        } else if (entry.isFile()) {
-          if (matchesPattern(entry.name, ignorePatterns)) {
-            continue;
-          }
-          const ext = path.extname(entry.name).replace(/^\./, "").toLowerCase();
-          if (normalizedExtensions.includes(ext)) {
-            files.push(fullPath);
+          const fullPath = path.join(dir, name);
+          const info = yield* fs.stat(fullPath);
+          if (isDirectoryInfo(info)) {
+            const relative = normalizeIgnoreDir(path.relative(rootDir, fullPath));
+            if (
+              ignoreDirSet.has(name) ||
+              ignoreDirSet.has(relative) ||
+              matchesPattern(name, ignorePatterns)
+            ) {
+              continue;
+            }
+            yield* walk(fullPath);
+          } else if (isFileInfo(info)) {
+            if (matchesPattern(name, ignorePatterns)) {
+              continue;
+            }
+            const ext = path.extname(name).replace(/^\./, "").toLowerCase();
+            if (normalizedExtensions.includes(ext)) {
+              files.push(fullPath);
+            }
           }
         }
-      }
-    };
+      });
 
-    await walk(rootDir);
+    yield* walk(rootDir);
     return files.sort();
   });
 
 const buildOutput = (rootDir: string, files: string[], log: (message: string) => void) =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
     let output = "";
     for (const filePath of files) {
       const relative = `./${path.relative(rootDir, filePath)}`;
       log(` -> Adding: ${relative}`);
-      const content = yield* _(Effect.tryPromise(() => fs.readFile(filePath, "utf8")));
+      const content = yield* fs.readFileString(filePath);
       output += `--- FILE: ${relative} ---\n${content}\n\n`;
     }
     return output;
   });
 
-const main = Effect.gen(function* (_) {
+const main = Effect.gen(function* () {
   const args = process.argv.slice(2);
-  const parsed = yield* _(parseArgs(args));
+  const parsed = yield* parseArgs(args);
   if (!parsed) {
     return;
   }
 
   const { targetDir, extensions, ignoreDirs, ignorePatterns, stdoutMode } = parsed;
 
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const resolvedDir = path.resolve(targetDir);
-  const statResult = yield* _(
-    Effect.tryPromise(() => fs.stat(resolvedDir)).pipe(
-      Effect.catchAll(() => Effect.succeed(null))
-    )
+  const statResult = yield* fs.stat(resolvedDir).pipe(
+    Effect.catchAll(() => Effect.succeed(null))
   );
 
-  if (!statResult || !statResult.isDirectory()) {
-    return yield* _(
-      Effect.fail(new Error(`Error: Directory '${targetDir}' not found.`))
+  if (!statResult || !isDirectoryInfo(statResult)) {
+    return yield* Effect.fail(
+      new Error(`Error: Directory '${targetDir}' not found.`)
     );
   }
 
   const log = stdoutMode ? console.error : console.log;
   log(`Gathering context from '${targetDir}'...`);
 
-  const files = yield* _(collectFiles(resolvedDir, extensions, ignoreDirs, ignorePatterns));
+  const files = yield* collectFiles(resolvedDir, extensions, ignoreDirs, ignorePatterns);
   if (files.length === 0) {
-    yield* _(Effect.sync(() => console.error("Warning: No matching files were found. Nothing has been changed or printed.")));
+    yield* Effect.sync(() =>
+      console.error("Warning: No matching files were found. Nothing has been changed or printed.")
+    );
     return;
   }
 
-  const output = yield* _(buildOutput(resolvedDir, files, log));
+  const output = yield* buildOutput(resolvedDir, files, log);
 
   if (stdoutMode) {
     process.stdout.write(output);
     return;
   }
 
-  yield* _(writeClipboard(output));
+  yield* writeClipboard(output);
   log("-----------------------------------------------------");
   log(`Success! Copied content of ${files.length} files to the clipboard.`);
 });
 
-Effect.runPromise(main).catch((error) => {
+Effect.runPromise(main.pipe(Effect.provide(BunContext.layer))).catch((error) => {
   if (error instanceof Error && error.message) {
     console.error(error.message);
   }

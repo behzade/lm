@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
+import { FileSystem, Path } from "@effect/platform";
+import { BunContext } from "@effect/platform-bun";
 import { Effect } from "effect";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import {
   DEFAULT_SYSTEM_PROMPT,
   getConfigPath,
@@ -49,7 +49,7 @@ const readStdin = () =>
   });
 
 const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
     const files: string[] = [];
     let fromClipboard = false;
     let agent: string | undefined;
@@ -75,9 +75,11 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
         case "--file": {
           const next = args[index + 1];
           if (!next) {
-            yield* _(Effect.sync(() => console.error("Error: --file requires a path.")));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Missing --file argument")));
+            yield* Effect.sync(() =>
+              console.error("Error: --file requires a path.")
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Missing --file argument"));
           }
           files.push(next);
           index += 2;
@@ -92,9 +94,11 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
         case "--agent": {
           const next = args[index + 1];
           if (!next) {
-            yield* _(Effect.sync(() => console.error("Error: --agent requires a name.")));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Missing --agent argument")));
+            yield* Effect.sync(() =>
+              console.error("Error: --agent requires a name.")
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Missing --agent argument"));
           }
           agent = next;
           index += 2;
@@ -104,9 +108,11 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
         case "--edit-agent": {
           const next = args[index + 1];
           if (!next) {
-            yield* _(Effect.sync(() => console.error("Error: --edit-agent requires a name.")));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Missing --edit-agent argument")));
+            yield* Effect.sync(() =>
+              console.error("Error: --edit-agent requires a name.")
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Missing --edit-agent argument"));
           }
           editAgent = next;
           index += 2;
@@ -116,9 +122,11 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
         case "--model": {
           const next = args[index + 1];
           if (!next) {
-            yield* _(Effect.sync(() => console.error("Error: --model requires a value.")));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Missing --model argument")));
+            yield* Effect.sync(() =>
+              console.error("Error: --model requires a value.")
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Missing --model argument"));
           }
           model = next;
           index += 2;
@@ -128,9 +136,11 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
         case "--api-url": {
           const next = args[index + 1];
           if (!next) {
-            yield* _(Effect.sync(() => console.error("Error: --api-url requires a value.")));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Missing --api-url argument")));
+            yield* Effect.sync(() =>
+              console.error("Error: --api-url requires a value.")
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Missing --api-url argument"));
           }
           apiUrl = next;
           index += 2;
@@ -141,9 +151,11 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
           const next = args[index + 1];
           const parsed = Number(next);
           if (!next || Number.isNaN(parsed)) {
-            yield* _(Effect.sync(() => console.error("Error: --max-tool-turns requires a number.")));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Invalid --max-tool-turns")));
+            yield* Effect.sync(() =>
+              console.error("Error: --max-tool-turns requires a number.")
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Invalid --max-tool-turns"));
           }
           maxToolTurns = parsed;
           index += 2;
@@ -154,9 +166,11 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
           const next = args[index + 1];
           const parsed = Number(next);
           if (!next || Number.isNaN(parsed)) {
-            yield* _(Effect.sync(() => console.error("Error: --temperature requires a number.")));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Invalid --temperature")));
+            yield* Effect.sync(() =>
+              console.error("Error: --temperature requires a number.")
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Invalid --temperature"));
           }
           temperature = parsed;
           index += 2;
@@ -167,9 +181,11 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
           const next = args[index + 1];
           const parsed = Number(next);
           if (!next || Number.isNaN(parsed)) {
-            yield* _(Effect.sync(() => console.error("Error: --top-p requires a number.")));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Invalid --top-p")));
+            yield* Effect.sync(() =>
+              console.error("Error: --top-p requires a number.")
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Invalid --top-p"));
           }
           topP = parsed;
           index += 2;
@@ -177,7 +193,7 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
         }
         case "-h":
         case "--help":
-          yield* _(Effect.sync(() => console.log(usageText)));
+          yield* Effect.sync(() => console.log(usageText));
           return null;
         default: {
           if (arg.startsWith("--file=")) {
@@ -213,7 +229,7 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
           if (arg.startsWith("--max-tool-turns=")) {
             const parsed = Number(arg.slice("--max-tool-turns=".length));
             if (Number.isNaN(parsed)) {
-              return yield* _(Effect.fail(new Error("Invalid --max-tool-turns")));
+              return yield* Effect.fail(new Error("Invalid --max-tool-turns"));
             }
             maxToolTurns = parsed;
             index += 1;
@@ -222,7 +238,7 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
           if (arg.startsWith("--temperature=")) {
             const parsed = Number(arg.slice("--temperature=".length));
             if (Number.isNaN(parsed)) {
-              return yield* _(Effect.fail(new Error("Invalid --temperature")));
+              return yield* Effect.fail(new Error("Invalid --temperature"));
             }
             temperature = parsed;
             index += 1;
@@ -231,16 +247,18 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
           if (arg.startsWith("--top-p=")) {
             const parsed = Number(arg.slice("--top-p=".length));
             if (Number.isNaN(parsed)) {
-              return yield* _(Effect.fail(new Error("Invalid --top-p")));
+              return yield* Effect.fail(new Error("Invalid --top-p"));
             }
             topP = parsed;
             index += 1;
             break;
           }
           if (arg.startsWith("-")) {
-            yield* _(Effect.sync(() => console.error(`Error: Unknown option '${arg}'`)));
-            yield* _(Effect.sync(() => console.log(usageText)));
-            return yield* _(Effect.fail(new Error("Unknown option")));
+            yield* Effect.sync(() =>
+              console.error(`Error: Unknown option '${arg}'`)
+            );
+            yield* Effect.sync(() => console.log(usageText));
+            return yield* Effect.fail(new Error("Unknown option"));
           }
           promptParts.push(arg);
           index += 1;
@@ -265,30 +283,33 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
   });
 
 const editAgentProfile = (agentName: string) =>
-  Effect.gen(function* (_) {
-    const configDir = getConfigPath();
+  Effect.gen(function* () {
+    const configDir = yield* getConfigPath;
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
     const promptPath = path.join(configDir, `${agentName}.md`);
     const editor = process.env.EDITOR ?? "nano";
 
-    yield* _(Effect.tryPromise(() => fs.mkdir(configDir, { recursive: true })));
-    yield* _(Effect.sync(() => console.log(`Opening agent '${agentName}' with ${editor}...`)));
-    yield* _(runCommandInherit(editor, [promptPath]));
+    yield* fs.makeDirectory(configDir, { recursive: true });
+    yield* Effect.sync(() =>
+      console.log(`Opening agent '${agentName}' with ${editor}...`)
+    );
+    yield* runCommandInherit(editor, [promptPath]);
   });
 
 const loadSystemPrompt = (agentName?: string) =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
     if (!agentName) {
       return DEFAULT_SYSTEM_PROMPT;
     }
 
-    const promptPath = path.join(getConfigPath(), `${agentName}.md`);
-    const content = yield* _(
-      Effect.tryPromise(() => fs.readFile(promptPath, "utf8")).pipe(
-        Effect.catchAll(() =>
-          Effect.fail(
-            new Error(`Agent not found at '${promptPath}'.`)
-          )
-        )
+    const configDir = yield* getConfigPath;
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const promptPath = path.join(configDir, `${agentName}.md`);
+    const content = yield* fs.readFileString(promptPath).pipe(
+      Effect.catchAll(() =>
+        Effect.fail(new Error(`Agent not found at '${promptPath}'.`))
       )
     );
 
@@ -297,18 +318,17 @@ const loadSystemPrompt = (agentName?: string) =>
   });
 
 const buildContext = (fromClipboard: boolean, files: string[]) =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
     const contextParts: string[] = [];
 
     if (fromClipboard) {
-      const clipboardContent = yield* _(
-        readClipboard().pipe(
-          Effect.catchAll((error) =>
-            Effect.sync(() => {
-              console.error(`Clipboard error: ${error}`);
-              return "";
-            })
-          )
+      const clipboardContent = yield* readClipboard().pipe(
+        Effect.catchAll((error) =>
+          Effect.sync(() => {
+            console.error(`Clipboard error: ${error}`);
+            return "";
+          })
         )
       );
       if (clipboardContent) {
@@ -319,13 +339,9 @@ const buildContext = (fromClipboard: boolean, files: string[]) =>
     }
 
     for (const filePath of files) {
-      const content = yield* _(
-        Effect.tryPromise(() => fs.readFile(filePath, "utf8")).pipe(
-          Effect.catchAll((error) =>
-            Effect.fail(
-              new Error(`Error reading file '${filePath}': ${error}`)
-            )
-          )
+      const content = yield* fs.readFileString(filePath).pipe(
+        Effect.catchAll((error) =>
+          Effect.fail(new Error(`Error reading file '${filePath}': ${error}`))
         )
       );
       contextParts.push(`--- Content from file: ${filePath} ---\n${content}`);
@@ -335,13 +351,13 @@ const buildContext = (fromClipboard: boolean, files: string[]) =>
   });
 
 const getInput = (promptArg?: string) =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
     const parts: string[] = [];
     if (promptArg) {
       parts.push(promptArg);
     }
 
-    const stdinContent = yield* _(readStdin());
+    const stdinContent = yield* readStdin();
     if (stdinContent) {
       parts.push(stdinContent);
     }
@@ -349,19 +365,19 @@ const getInput = (promptArg?: string) =>
     return parts.join("\n\n");
   });
 
-const main = Effect.gen(function* (_) {
+const main = Effect.gen(function* () {
   const args = process.argv.slice(2);
-  const parsed = yield* _(parseArgs(args));
+  const parsed = yield* parseArgs(args);
   if (!parsed) {
     return;
   }
 
   if (parsed.editAgent) {
-    yield* _(editAgentProfile(parsed.editAgent));
+    yield* editAgentProfile(parsed.editAgent);
     return;
   }
 
-  const config = yield* _(loadConfig());
+  const config = yield* loadConfig();
 
   const apiUrl = parsed.apiUrl ?? config.api_url;
   const model = parsed.model ?? config.model;
@@ -373,43 +389,39 @@ const main = Effect.gen(function* (_) {
   }
 
   if (!apiKey) {
-    return yield* _(
-      Effect.fail(
-        new Error(
-          `Error: Environment variable '${apiKeyVar}' is not set and is required.`
-        )
+    return yield* Effect.fail(
+      new Error(
+        `Error: Environment variable '${apiKeyVar}' is not set and is required.`
       )
     );
   }
 
-  const systemPrompt = yield* _(loadSystemPrompt(parsed.agent));
-  const contextStr = yield* _(buildContext(parsed.fromClipboard, parsed.files));
-  const userPrompt = yield* _(getInput(parsed.prompt));
+  const systemPrompt = yield* loadSystemPrompt(parsed.agent);
+  const contextStr = yield* buildContext(parsed.fromClipboard, parsed.files);
+  const userPrompt = yield* getInput(parsed.prompt);
 
   const finalUserMessage = contextStr
     ? `${contextStr}\n\n---\n\n${userPrompt}`
     : userPrompt;
 
   if (!finalUserMessage) {
-    return yield* _(Effect.fail(new Error("Error: Prompt is empty.")));
+    return yield* Effect.fail(new Error("Error: Prompt is empty."));
   }
 
-  yield* _(
-    runChatLoop({
-      apiUrl,
-      apiKey,
-      model,
-      systemPrompt,
-      userMessage: finalUserMessage,
-      maxToolTurns: parsed.maxToolTurns,
-      temperature: parsed.temperature,
-      topP: parsed.topP,
-      interactive: process.stdout.isTTY,
-    })
-  );
+  yield* runChatLoop({
+    apiUrl,
+    apiKey,
+    model,
+    systemPrompt,
+    userMessage: finalUserMessage,
+    maxToolTurns: parsed.maxToolTurns,
+    temperature: parsed.temperature,
+    topP: parsed.topP,
+    interactive: process.stdout.isTTY,
+  });
 });
 
-Effect.runPromise(main).catch((error) => {
+Effect.runPromise(main.pipe(Effect.provide(BunContext.layer))).catch((error) => {
   if (error instanceof Error && error.message) {
     console.error(error.message);
   }

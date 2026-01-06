@@ -108,7 +108,7 @@ const streamChat = (
   });
 
 export const runChatLoop = (options: ChatOptions) =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
     const client = new OpenAI({
       apiKey: options.apiKey,
       baseURL: options.apiUrl,
@@ -136,8 +136,10 @@ export const runChatLoop = (options: ChatOptions) =>
         apiArgs.tool_choice = turn === options.maxToolTurns - 1 ? "none" : "auto";
       }
 
-      const streamResult = yield* _(
-        streamChat(client, apiArgs, options.interactive)
+      const streamResult = yield* streamChat(
+        client,
+        apiArgs,
+        options.interactive
       );
       const assistantToolCalls = streamResult.toolCalls;
       const fullContent = streamResult.content;
@@ -156,9 +158,7 @@ export const runChatLoop = (options: ChatOptions) =>
         break;
       }
 
-      yield* _(
-        Effect.sync(() => console.error("Tool call(s) requested..."))
-      );
+      yield* Effect.sync(() => console.error("Tool call(s) requested..."));
 
       for (const toolCall of assistantToolCalls) {
         const functionName = toolCall.function.name;
@@ -172,15 +172,13 @@ export const runChatLoop = (options: ChatOptions) =>
             throw new Error(`Tool '${functionName}' not found.`);
           }
 
-          yield* _(
-            Effect.sync(() =>
-              console.error(
-                `Performing: ${functionName} with args: ${JSON.stringify(args)}`
-              )
+          yield* Effect.sync(() =>
+            console.error(
+              `Performing: ${functionName} with args: ${JSON.stringify(args)}`
             )
           );
 
-          toolOutput = yield* _(toolInfo.handler(args));
+          toolOutput = yield* toolInfo.handler(args);
         } catch (error) {
           toolOutput = `Error during tool execution: ${error}`;
         }
@@ -194,10 +192,8 @@ export const runChatLoop = (options: ChatOptions) =>
     }
 
     if (options.interactive && (totalInTokens + totalOutTokens) > 0) {
-      yield* _(
-        Effect.sync(() =>
-          console.error(`\n->:${totalInTokens} <-:${totalOutTokens}`)
-        )
+      yield* Effect.sync(() =>
+        console.error(`\n->:${totalInTokens} <-:${totalOutTokens}`)
       );
     }
   });

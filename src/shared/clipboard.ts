@@ -41,41 +41,45 @@ const getReadCommand = () => {
 };
 
 export const writeClipboard = (text: string) =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
     const command = getWriteCommand();
     if (!command) {
-      return yield* _(Effect.fail(new Error("Clipboard utility not found.")));
+      return yield* Effect.fail(new Error("Clipboard utility not found."));
     }
 
-    const result = yield* _(runCommand(command.cmd, command.args, { stdin: text }));
+    const result = yield* runCommand(command.cmd, command.args, { stdin: text });
     if (result.exitCode !== 0) {
-      return yield* _(Effect.fail(new Error(result.stderr || "Clipboard write failed.")));
+      return yield* Effect.fail(
+        new Error(result.stderr || "Clipboard write failed.")
+      );
     }
   });
 
 export const readClipboard = () =>
-  Effect.gen(function* (_) {
+  Effect.gen(function* () {
     const command = getReadCommand();
     if (!command) {
-      return yield* _(Effect.fail(new Error("Clipboard utility not found.")));
+      return yield* Effect.fail(new Error("Clipboard utility not found."));
     }
 
-    const result = yield* _(runCommand(command.cmd, command.args));
+    const result = yield* runCommand(command.cmd, command.args);
     if (result.exitCode !== 0) {
-      return yield* _(Effect.fail(new Error(result.stderr || "Clipboard read failed.")));
+      return yield* Effect.fail(
+        new Error(result.stderr || "Clipboard read failed.")
+      );
     }
 
     return result.stdout;
   });
 
-export const hasClipboardSupport = Effect.gen(function* (_) {
+export const hasClipboardSupport = Effect.gen(function* () {
   const platform = process.platform;
   if (platform === "darwin") {
-    return yield* _(commandExists("pbcopy"));
+    return yield* commandExists("pbcopy");
   }
   if (platform === "linux") {
-    const hasWl = yield* _(commandExists("wl-copy"));
-    const hasXclip = yield* _(commandExists("xclip"));
+    const hasWl = yield* commandExists("wl-copy");
+    const hasXclip = yield* commandExists("xclip");
     return hasWl || hasXclip;
   }
   return false;
