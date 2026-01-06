@@ -29,9 +29,9 @@ export const getJournalPaths = Effect.gen(function* () {
   const homeDir = yield* getHomeDir;
   const journalDir = path.join(homeDir, "journal");
   const notesDir = path.join(journalDir, "notes");
-  const stateDir = process.env.XDG_CONFIG_HOME
-    ? path.join(process.env.XDG_CONFIG_HOME, "lm")
-    : path.join(homeDir, ".config", "lm");
+  const stateDir = process.env.XDG_STATE_HOME
+    ? path.join(process.env.XDG_STATE_HOME, "lm")
+    : path.join(homeDir, ".local", "state", "lm");
   const stateFile = path.join(stateDir, "j-state.json");
   return { path, journalDir, notesDir, stateDir, stateFile } satisfies JournalPaths;
 });
@@ -358,6 +358,83 @@ const getPreviewLine = (content: string) => {
   return "";
 };
 
+export const getEntries = (tag?: string) =>
+  Effect.gen(function* () {
+    const { path } = yield* getJournalPaths;
+    const files = yield* listEntryFiles(tag);
+    return files.map((filePath) => ({
+      date: path.basename(filePath, ".md"),
+      path: filePath,
+    }));
+  });
+
+export const getTimelineEntries = (tag?: string) =>
+  Effect.gen(function* () {
+    const { path } = yield* getJournalPaths;
+    const files = yield* listEntryFiles(tag);
+    const entries: { date: string; path: string; preview: string }[] = [];
+
+    for (const filePath of files) {
+      const datePart = path.basename(filePath, ".md");
+      const content = yield* readFile(filePath);
+      const previewLine = getPreviewLine(content) || "(empty)";
+      entries.push({ date: datePart, path: filePath, preview: previewLine });
+    }
+
+    return entries;
+  });
+
+export const getNotes = () =>
+  Effect.gen(function* () {
+    const { notesDir, path } = yield* getJournalPaths;
+    const files = yield* walkMarkdownFiles(notesDir, []);
+    return files
+      .map((filePath) => ({
+        slug: path.basename(filePath, ".md"),
+        path: filePath,
+      }))
+      .sort((a, b) => a.slug.localeCompare(b.slug));
+  });
+
+export const getSearchMatches = () =>
+  Effect.gen(function* () {
+    const { journalDir } = yield* getJournalPaths;
+    const result = yield* runCommand("rg", ["--json", "--smart-case", "", journalDir]);
+    if (!result.stdout) {
+      return [];
+    }
+
+    const matches: { path: string; line: number; text: string }[] = [];
+    for (const line of result.stdout.split(/\r?\n/)) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const event = JSON.parse(line) as {
+          type?: string;
+          data?: {
+            path?: { text?: string };
+            line_number?: number;
+            lines?: { text?: string };
+          };
+        };
+        if (event.type !== "match" || !event.data) {
+          continue;
+        }
+        const filePath = event.data.path?.text ?? "";
+        const lineNumber = event.data.line_number ?? 0;
+        const text = (event.data.lines?.text ?? "").replace(/\n$/, "");
+        if (filePath && lineNumber > 0) {
+          matches.push({ path: filePath, line: lineNumber, text });
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return matches;
+  });
+
 const fzfSelect = (lines: string[], options: {
   prompt?: string;
   preview?: string;
@@ -513,18 +590,17 @@ export const noteBrowse = (slug?: string) =>
     yield* openNote(selected);
   });
 
-export const openMostRecent = () =>
+export const getMostRecentPath = () =>
   Effect.gen(function* () {
     const { journalDir } = yield* getJournalPaths;
     const lastOpened = yield* readLastOpened();
     if (lastOpened) {
-      yield* openInEditor(lastOpened);
-      return;
+      return lastOpened;
     }
 
     const files = yield* walkMarkdownFiles(journalDir, []);
     if (files.length === 0) {
-      return yield* Effect.fail(new Error("No entries found."));
+      return "";
     }
 
     let bestFile = files[0];
@@ -538,6 +614,15 @@ export const openMostRecent = () =>
       }
     }
 
+    return bestFile;
+  });
+
+export const openMostRecent = () =>
+  Effect.gen(function* () {
+    const bestFile = yield* getMostRecentPath();
+    if (!bestFile) {
+      return yield* Effect.fail(new Error("No entries found."));
+    }
     yield* openInEditor(bestFile);
   });
 
@@ -635,10 +720,6 @@ export const extractToNote = (options: {
       sourceInfo.kind === "entry"
         ? entryPathForDate(paths, sourceInfo.id)
         : notePathForSlug(paths, sourceInfo.id);
-    const dailyPath =
-      sourceInfo.kind === "entry"
-        ? sourcePath
-        : entryPathForDate(paths, formatDate(new Date()));
     const targetPath = notePathForSlug(paths, targetSlug);
 
     const sourceContentResult = yield* readFile(sourcePath).pipe(
@@ -664,23 +745,8 @@ export const extractToNote = (options: {
     const extractedLines = lines.slice(start - 1, end);
     const extractedText = extractedLines.join("\n");
 
-    const linkTarget = `notes/${targetSlug}.md`;
-    const linkLine = `[${targetSlug}](${linkTarget})`;
-
-    let nextSourceLines = lines.slice(0, start - 1);
-    if (sourceInfo.kind === "entry") {
-      const indent = extractedLines[0]?.match(/^\s*/)?.[0] ?? "";
-      nextSourceLines.push(`${indent}${linkLine}`);
-    }
-    nextSourceLines = nextSourceLines.concat(lines.slice(end));
+    const nextSourceLines = lines.slice(0, start - 1).concat(lines.slice(end));
     yield* fs.writeFileString(sourcePath, nextSourceLines.join("\n"));
-
-    if (sourceInfo.kind !== "entry") {
-      yield* ensureFileExists(dailyPath, formatDate(new Date()));
-      const dailyContent = yield* readFile(dailyPath);
-      const updatedDaily = appendWithSpacing(dailyContent, linkLine);
-      yield* fs.writeFileString(dailyPath, updatedDaily);
-    }
 
     yield* ensureFileExists(targetPath, targetSlug);
     const targetContent = yield* readFile(targetPath);

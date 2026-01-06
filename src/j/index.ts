@@ -5,6 +5,12 @@ import { Effect } from "effect";
 import {
   dateDaysAgo,
   getJournalPaths,
+  getEntries,
+  getMostRecentPath,
+  getNotes,
+  getSearchMatches,
+  getTimelineEntries,
+  listTags,
   noteBrowse,
   openEntry,
   extractToNote,
@@ -34,6 +40,7 @@ Tags (line 2 only, not full document):
   -t=TAG, --tag=TAG  Same (example: j -t=ai)
 
   -h, --help         Show this help
+  --json             Output JSON results (no fzf/nvim)
 
 Tag conventions supported (line 2 only):
   - tags: ai, work
@@ -68,6 +75,7 @@ type ParsedArgs = {
   extractStart?: number;
   extractEnd?: number;
   extractSlug?: string;
+  json?: boolean;
 };
 
 const formatDate = (date: Date) => {
@@ -76,6 +84,9 @@ const formatDate = (date: Date) => {
   const dd = String(date.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
 };
+
+const outputJson = (value: unknown) =>
+  Effect.sync(() => console.log(JSON.stringify(value, null, 2)));
 
 const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
   Effect.gen(function* () {
@@ -91,6 +102,7 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
     let extractStart: number | undefined;
     let extractEnd: number | undefined;
     let extractSlug: string | undefined;
+    let json = false;
 
     let index = 0;
     while (index < args.length) {
@@ -178,6 +190,10 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
           index += 5;
           break;
         }
+        case "--json":
+          json = true;
+          index += 1;
+          break;
         default: {
           if (arg.startsWith("--tag=")) {
             tag = arg.slice("--tag=".length);
@@ -226,6 +242,7 @@ const parseArgs = (args: string[]): Effect.Effect<ParsedArgs | null> =>
       extractStart,
       extractEnd,
       extractSlug,
+      json,
     } satisfies ParsedArgs;
   });
 
@@ -237,8 +254,99 @@ const main = Effect.gen(function* () {
   }
 
   const fs = yield* FileSystem.FileSystem;
-  const { journalDir } = yield* getJournalPaths;
+  const paths = yield* getJournalPaths;
+  const { journalDir } = paths;
   yield* fs.makeDirectory(journalDir, { recursive: true });
+
+  if (parsed.json) {
+    switch (parsed.mode) {
+      case "today": {
+        const date = formatDate(new Date());
+        const path = paths.path.join(paths.journalDir, `${date}.md`);
+        yield* outputJson({ date, path });
+        break;
+      }
+      case "offset": {
+        if (parsed.daysAgo === undefined) {
+          return;
+        }
+        const date = dateDaysAgo(parsed.daysAgo);
+        const path = paths.path.join(paths.journalDir, `${date}.md`);
+        yield* outputJson({ date, path });
+        break;
+      }
+      case "date": {
+        const entries = yield* getEntries(parsed.tag);
+        yield* outputJson(parsed.tag ? { tag: parsed.tag, entries } : { entries });
+        break;
+      }
+      case "search": {
+        const matches = yield* getSearchMatches();
+        yield* outputJson({ matches });
+        break;
+      }
+      case "timeline": {
+        const entries = yield* getTimelineEntries(parsed.tag);
+        yield* outputJson(parsed.tag ? { tag: parsed.tag, entries } : { entries });
+        break;
+      }
+      case "tag": {
+        if (parsed.tag) {
+          const entries = yield* getEntries(parsed.tag);
+          yield* outputJson({ tag: parsed.tag, entries });
+        } else {
+          const tags = yield* listTags();
+          yield* outputJson({ tags });
+        }
+        break;
+      }
+      case "note": {
+        if (parsed.noteSlug) {
+          const path = paths.path.join(paths.notesDir, `${parsed.noteSlug}.md`);
+          yield* outputJson({ slug: parsed.noteSlug, path });
+        } else {
+          const notes = yield* getNotes();
+          yield* outputJson({ notes });
+        }
+        break;
+      }
+      case "continue": {
+        const path = yield* getMostRecentPath();
+        if (!path) {
+          return yield* Effect.fail(new Error("No entries found."));
+        }
+        yield* outputJson({ path });
+        break;
+      }
+      case "extract": {
+        if (
+          !parsed.extractSource ||
+          parsed.extractStart === undefined ||
+          parsed.extractEnd === undefined ||
+          !parsed.extractSlug
+        ) {
+          return;
+        }
+        yield* extractToNote({
+          source: parsed.extractSource,
+          startLine: parsed.extractStart,
+          endLine: parsed.extractEnd,
+          slug: parsed.extractSlug,
+        });
+        yield* outputJson({
+          status: "ok",
+          source: parsed.extractSource,
+          startLine: parsed.extractStart,
+          endLine: parsed.extractEnd,
+          slug: parsed.extractSlug,
+        });
+        break;
+      }
+      default:
+        yield* Effect.fail(new Error(`Unknown mode: ${parsed.mode}`));
+    }
+    return;
+  }
 
   switch (parsed.mode) {
     case "today":

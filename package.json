@@ -2,6 +2,9 @@
   "name": "lm-tools",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build": "mkdir -p ~/.local/bin && bun build src/j/index.ts --compile --outfile ~/.local/bin/j && bun build src/ctx/index.ts --compile --outfile ~/.local/bin/ctx && bun build src/lm/index.ts --compile --outfile ~/.local/bin/lm"
+  },
   "bin": {
     "j": "src/j/index.ts",
     "ctx": "src/ctx/index.ts",
